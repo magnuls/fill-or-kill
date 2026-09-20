@@ -17,4 +17,4 @@ struct Trade {
 
 using Trades = std::vector<Trade>;
 
-#endif // LOB_TRADE_HPP
+#endif

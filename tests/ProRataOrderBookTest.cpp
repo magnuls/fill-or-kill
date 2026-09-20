@@ -6,12 +6,16 @@
 static void show(const char* title, const Trades& trades) {
     std::cout << title << '\n';
     for (const Trade& t : trades) {
-        std::cout << "  resting=" << t.OrderIdA << " aggressor=" << t.AggressorOrderId
-                  << (t.AggressorIsBuy ? " BUY " : " SELL ") << t.Size << " @ " << t.Level << '\n';
+        std::cout << "  resting=" << t.OrderIdA
+                  << " aggressor=" << t.AggressorOrderId
+                  << (t.AggressorIsBuy ? " BUY " : " SELL ") << t.Size
+                  << " @ " << t.Level << '\n';
     }
 }
 
-// Three resting asks at 100: sizes 60 / 30 / 10 (ids 1, 2, 3).
+// Three resting asks at 100
+// sizes 60 / 30 / 10
+// ids 1, 2, 3
 static ProRataOrderBook seeded() {
     ProRataOrderBook ob;
     assert(ob.AddOrder(Order{1, 100, false, 60}).empty());
@@ -51,7 +55,9 @@ static void sweep_and_rest() {
     ProRataOrderBook ob = seeded();
     assert(ob.AddOrder(Order{4, 101, false, 20}).empty());
     Trades t = ob.AddOrder(Order{12, 101, true, 150});
-    show("buy 150 @ 101 -> sweeps 100 fully, takes 20 @ 101, rests 30", t);
+    show(
+        "buy 150 @ 101 -> sweeps 100 fully, takes 20 @ 101, rests 30",
+        t);
     Trades want = {
         {1, 12, 12, true, 100, 60},
         {2, 12, 12, true, 100, 30},
@@ -79,7 +85,7 @@ static void cancel() {
         {3, 13, 13, true, 100, 2},
     };
     assert(t == want);
-    ob.CancelOrder(999); // unknown id is a no-op
+    ob.CancelOrder(999); // unknown id is a no op
     assert(ob.LevelTotal(100, false) == 32);
 }
 

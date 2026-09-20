@@ -16,4 +16,4 @@ struct Order {
 
 using Orders = std::vector<Order>;
 
-#endif // LOB_ORDER_HPP
+#endif
