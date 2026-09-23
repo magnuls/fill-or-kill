@@ -9,8 +9,10 @@ int main() {
     book.AddOrder(Order{3, 100, false, 10});
 
     for (const Trade& t : book.AddOrder(Order{10, 100, true, 50})) {
-        std::cout << "resting=" << t.OrderIdA << " aggressor=" << t.AggressorOrderId
-                  << (t.AggressorIsBuy ? " BUY " : " SELL ") << t.Size << " @ " << t.Level << '\n';
+        std::cout << "resting=" << t.OrderIdA
+                  << " aggressor=" << t.AggressorOrderId
+                  << (t.AggressorIsBuy ? " BUY " : " SELL ") << t.Size
+                  << " @ " << t.Level << '\n';
     }
     return 0;
 }
