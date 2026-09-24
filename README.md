@@ -1,6 +1,6 @@
 # LOB
 
-C++23 limit order book with a pluggable matching interface. The one book implemented so far allocates fills pro rata within a price level.
+Currently a Pro-Rata Order book
 
 ## What exists
 
