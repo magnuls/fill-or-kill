@@ -3,3 +3,5 @@ build/
 
 ImplementationDetails.md
 checklist.txt
+results/*.bin
+.DS_Store
