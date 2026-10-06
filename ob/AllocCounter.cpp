@@ -6,9 +6,9 @@
 
 namespace {
 
-std::atomic<ob::u64> gAllocs{0};
-std::atomic<ob::u64> gFrees{0};
-std::atomic<ob::u64> gBytes{0};
+std::atomic<ob::u64> g_allocs{0};
+std::atomic<ob::u64> g_frees{0};
+std::atomic<ob::u64> g_bytes{0};
 
 void* Allocate(std::size_t n) {
     if (n == 0)
@@ -16,8 +16,8 @@ void* Allocate(std::size_t n) {
     void* p = std::malloc(n);
     if (!p)
         throw std::bad_alloc();
-    gAllocs.fetch_add(1, std::memory_order_relaxed);
-    gBytes.fetch_add(n, std::memory_order_relaxed);
+    g_allocs.fetch_add(1, std::memory_order_relaxed);
+    g_bytes.fetch_add(n, std::memory_order_relaxed);
     return p;
 }
 
@@ -29,33 +29,33 @@ void* AllocateAligned(std::size_t n, std::size_t align) {
     void* p = nullptr;
     if (posix_memalign(&p, align, n) != 0)
         throw std::bad_alloc();
-    gAllocs.fetch_add(1, std::memory_order_relaxed);
-    gBytes.fetch_add(n, std::memory_order_relaxed);
+    g_allocs.fetch_add(1, std::memory_order_relaxed);
+    g_bytes.fetch_add(n, std::memory_order_relaxed);
     return p;
 }
 
 void Release(void* p) noexcept {
     if (!p)
         return;
-    gFrees.fetch_add(1, std::memory_order_relaxed);
+    g_frees.fetch_add(1, std::memory_order_relaxed);
     std::free(p);
 }
 
-} // namespace
+}
 
 namespace ob {
 
 u64 AllocationCount() {
-    return gAllocs.load(std::memory_order_relaxed);
+    return g_allocs.load(std::memory_order_relaxed);
 }
 u64 DeallocationCount() {
-    return gFrees.load(std::memory_order_relaxed);
+    return g_frees.load(std::memory_order_relaxed);
 }
 u64 AllocatedBytes() {
-    return gBytes.load(std::memory_order_relaxed);
+    return g_bytes.load(std::memory_order_relaxed);
 }
 
-} // namespace ob
+}
 
 void* operator new(std::size_t n) {
     return Allocate(n);
