@@ -7,9 +7,9 @@ namespace ob {
 
 class StubBook {
   public:
-    static constexpr const char* kName = "stub";
-    static constexpr bool kNoAllocations = true;
-    static constexpr bool kIsStub = true;
+    static constexpr const char* NAME = "stub";
+    static constexpr bool NO_ALLOCATIONS = true;
+    static constexpr bool IS_STUB = true;
 
     void OnAdd(OrderId, Side, Price, Volume) {
         ++counter_;
@@ -42,6 +42,6 @@ class StubBook {
     u64 counter_ = 0;
 };
 
-} // namespace ob
+}
 
 #endif
