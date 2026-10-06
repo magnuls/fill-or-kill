@@ -86,6 +86,6 @@ static_assert(!std::is_convertible_v<Volume, Price>);
 static_assert(!std::is_convertible_v<i32, Price>);
 static_assert(!std::is_convertible_v<i64, Volume>);
 
-} // namespace ob
+}
 
 #endif
