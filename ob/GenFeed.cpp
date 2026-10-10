@@ -17,7 +17,7 @@ void Usage() {
            "                  [--max-volume N]\n";
 }
 
-} // namespace
+}
 
 int main(int argc, char** argv) {
     ob::FeedConfig cfg;
@@ -36,34 +36,34 @@ int main(int argc, char** argv) {
         else if (a == "--seed")
             cfg.seed = std::stoull(next("--seed"));
         else if (a == "--count")
-            cfg.updateCount = std::stoull(next("--count"));
+            cfg.update_count = std::stoull(next("--count"));
         else if (a == "--new-level-rate")
-            cfg.newLevelRate = std::stod(next("--new-level-rate"));
+            cfg.new_level_rate = std::stod(next("--new-level-rate"));
         else if (a == "--levels")
-            cfg.levelsPerSide =
+            cfg.levels_per_side =
                 static_cast<ob::u32>(std::stoul(next("--levels")));
         else if (a == "--max-depth")
-            cfg.maxDepth =
+            cfg.max_depth =
                 static_cast<ob::u32>(std::stoul(next("--max-depth")));
         else if (a == "--depth-exponent")
-            cfg.depthExponent = std::stod(next("--depth-exponent"));
+            cfg.depth_exponent = std::stod(next("--depth-exponent"));
         else if (a == "--mid")
-            cfg.midPrice =
+            cfg.mid_price =
                 static_cast<ob::i32>(std::stol(next("--mid")));
         else if (a == "--orders-per-level")
-            cfg.ordersPerLevelSeed = static_cast<ob::u32>(
+            cfg.orders_per_level_seed = static_cast<ob::u32>(
                 std::stoul(next("--orders-per-level")));
         else if (a == "--add")
-            cfg.addPct =
+            cfg.add_pct =
                 static_cast<ob::u32>(std::stoul(next("--add")));
         else if (a == "--modify")
-            cfg.modifyPct =
+            cfg.modify_pct =
                 static_cast<ob::u32>(std::stoul(next("--modify")));
         else if (a == "--delete")
-            cfg.deletePct =
+            cfg.delete_pct =
                 static_cast<ob::u32>(std::stoul(next("--delete")));
         else if (a == "--max-volume")
-            cfg.maxVolume = static_cast<ob::u32>(
+            cfg.max_volume = static_cast<ob::u32>(
                 std::stoul(next("--max-volume")));
         else if (a == "--help" || a == "-h") {
             Usage();
@@ -83,7 +83,7 @@ int main(int argc, char** argv) {
         ob::u64 t0 = ob::MonotonicNs();
         std::vector<ob::Update> feed = ob::GenerateFeed(cfg);
         ob::u64 t1 = ob::MonotonicNs();
-        ob::WriteFeed(out, cfg, feed);
+        ob::WriteFeed(out, cfg, feed, "synthetic");
         ob::u64 t2 = ob::MonotonicNs();
         std::cout << "generated " << feed.size() << " updates in "
                   << static_cast<double>(t1 - t0) / 1e9

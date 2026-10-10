@@ -10,29 +10,30 @@ namespace ob {
 
 struct FeedConfig {
     u64 seed = 1;
-    u64 updateCount = 10'000'000;
-    u32 levelsPerSide = 1000;
-    u32 maxDepth = 1000;
-    i32 midPrice = 100000;
-    u32 ordersPerLevelSeed = 4;
-    f64 depthExponent = 1.5;
-    f64 newLevelRate = 0.05;
-    u32 addPct = 40;
-    u32 modifyPct = 30;
-    u32 deletePct = 30;
-    u32 maxVolume = 500;
+    u64 update_count = 10'000'000;
+    u32 levels_per_side = 1000;
+    u32 max_depth = 1000;
+    i32 mid_price = 100000;
+    u32 orders_per_level_seed = 4;
+    f64 depth_exponent = 1.5;
+    f64 new_level_rate = 0.05;
+    u32 add_pct = 40;
+    u32 modify_pct = 30;
+    u32 delete_pct = 30;
+    u32 max_volume = 500;
 
     u64 SeedMessageCount() const {
-        return static_cast<u64>(levelsPerSide) * ordersPerLevelSeed *
-               2;
+        return static_cast<u64>(levels_per_side) *
+               orders_per_level_seed * 2;
     }
 };
 
 static_assert(std::is_trivially_copyable_v<FeedConfig>);
 static_assert(sizeof(FeedConfig) == 64);
 
-constexpr u64 kFeedMagic = 0x4f42464545443031ull;
-constexpr u32 kFeedVersion = 1;
+constexpr u64 FEED_MAGIC = 0x4f42464545443031ull;
+constexpr u32 FEED_VERSION = 2;
+constexpr std::size_t FEED_SOURCE_BYTES = 32;
 
 struct FeedHeader {
     u64 magic;
@@ -40,17 +41,19 @@ struct FeedHeader {
     u32 pad;
     FeedConfig config;
     u64 count;
+    char source[FEED_SOURCE_BYTES];
 };
 
 static_assert(std::is_trivially_copyable_v<FeedHeader>);
-static_assert(sizeof(FeedHeader) == 88);
+static_assert(sizeof(FeedHeader) == 120);
 
 std::vector<Update>
 GenerateFeed(const FeedConfig& cfg,
-             std::vector<u32>* depthOut = nullptr);
+             std::vector<u32>* depth_out = nullptr);
 
 void WriteFeed(const std::string& path, const FeedConfig& cfg,
-               const std::vector<Update>& updates);
+               const std::vector<Update>& updates,
+               const std::string& source = "synthetic");
 
 class MappedFeed {
   public:
@@ -74,6 +77,7 @@ class MappedFeed {
     u64 bytes() const {
         return bytes_;
     }
+    std::string source() const;
 
   private:
     void* base_ = nullptr;
@@ -84,6 +88,6 @@ class MappedFeed {
 
 std::string DescribeConfig(const FeedConfig& cfg);
 
-} // namespace ob
+}
 
 #endif

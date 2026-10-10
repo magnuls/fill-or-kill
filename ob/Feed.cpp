@@ -64,40 +64,41 @@ struct ShadowSide {
 
 class Generator {
   public:
-    Generator(const FeedConfig& cfg, std::vector<u32>* depthOut)
-        : cfg_(cfg), rng_(cfg.seed), depthOut_(depthOut) {
+    Generator(const FeedConfig& cfg, std::vector<u32>* depth_out)
+        : cfg_(cfg), rng_(cfg.seed), depth_out_(depth_out) {
         bids_.side = Side::Bid;
         asks_.side = Side::Ask;
         BuildDepthCdf();
     }
 
     std::vector<Update> Run() {
-        if (cfg_.addPct + cfg_.modifyPct + cfg_.deletePct != 100)
+        if (cfg_.add_pct + cfg_.modify_pct + cfg_.delete_pct != 100)
             throw std::invalid_argument(
                 "message type percentages must sum to 100");
-        if (cfg_.levelsPerSide == 0 || cfg_.ordersPerLevelSeed == 0)
+        if (cfg_.levels_per_side == 0 ||
+            cfg_.orders_per_level_seed == 0)
             throw std::invalid_argument(
                 "levelsPerSide and ordersPerLevelSeed must be "
                 "positive");
-        if (cfg_.updateCount < cfg_.SeedMessageCount())
+        if (cfg_.update_count < cfg_.SeedMessageCount())
             throw std::invalid_argument(
                 "updateCount smaller than the seed message count");
-        out_.reserve(cfg_.updateCount);
-        if (depthOut_)
-            depthOut_->reserve(cfg_.updateCount);
+        out_.reserve(cfg_.update_count);
+        if (depth_out_)
+            depth_out_->reserve(cfg_.update_count);
         SeedBook();
-        while (out_.size() < cfg_.updateCount)
+        while (out_.size() < cfg_.update_count)
             Step();
         return std::move(out_);
     }
 
   private:
     void BuildDepthCdf() {
-        cdf_.resize(cfg_.maxDepth);
+        cdf_.resize(cfg_.max_depth);
         f64 acc = 0;
-        for (u32 k = 0; k < cfg_.maxDepth; ++k) {
+        for (u32 k = 0; k < cfg_.max_depth; ++k) {
             acc += std::pow(static_cast<f64>(k + 1),
-                            -cfg_.depthExponent);
+                            -cfg_.depth_exponent);
             cdf_[k] = acc;
         }
         for (f64& c : cdf_)
@@ -108,7 +109,7 @@ class Generator {
         f64 u = uniform_(rng_);
         auto it = std::lower_bound(cdf_.begin(), cdf_.end(), u);
         if (it == cdf_.end())
-            return cfg_.maxDepth - 1;
+            return cfg_.max_depth - 1;
         return static_cast<u32>(it - cdf_.begin());
     }
 
@@ -123,7 +124,7 @@ class Generator {
     Volume RandomVolume() {
         return Volume{
             static_cast<i64>(std::uniform_int_distribution<u32>(
-                1, cfg_.maxVolume)(rng_))};
+                1, cfg_.max_volume)(rng_))};
     }
 
     u64 NextTimestamp() {
@@ -135,12 +136,12 @@ class Generator {
               Volume volume, u32 depth) {
         out_.push_back(Update{type, side, 0, price, id, volume,
                               NextTimestamp()});
-        if (depthOut_)
-            depthOut_->push_back(depth);
+        if (depth_out_)
+            depth_out_->push_back(depth);
     }
 
     void EmitAdd(ShadowSide& sd, Price price, u32 depth) {
-        OrderId id = nextId_++;
+        OrderId id = next_id_++;
         Volume v = RandomVolume();
         auto& ids = sd.orders[price.ticks];
         u32 slot = static_cast<u32>(ids.size());
@@ -150,13 +151,13 @@ class Generator {
     }
 
     void SeedBook() {
-        Price bid{cfg_.midPrice - 1};
-        Price ask{cfg_.midPrice + 1};
+        Price bid{cfg_.mid_price - 1};
+        Price ask{cfg_.mid_price + 1};
         std::uniform_int_distribution<i32> gap(1, 3);
-        for (u32 k = 0; k < cfg_.levelsPerSide; ++k) {
+        for (u32 k = 0; k < cfg_.levels_per_side; ++k) {
             bids_.InsertLevel(bid);
             asks_.InsertLevel(ask);
-            for (u32 j = 0; j < cfg_.ordersPerLevelSeed; ++j) {
+            for (u32 j = 0; j < cfg_.orders_per_level_seed; ++j) {
                 EmitAdd(bids_, bid, k);
                 EmitAdd(asks_, ask, k);
             }
@@ -196,7 +197,7 @@ class Generator {
         Side side = CoinSide();
         ShadowSide& sd = SideRef(side);
         u32 k = SampleDepth();
-        if (uniform_(rng_) < cfg_.newLevelRate &&
+        if (uniform_(rng_) < cfg_.new_level_rate &&
             TryCreateLevel(sd, k))
             return;
         u32 idx =
@@ -211,12 +212,12 @@ class Generator {
         OrderId id;
     };
 
-    Pick PickOrder(bool allowPrune) {
+    Pick PickOrder(bool allow_prune) {
         Side side = CoinSide();
         ShadowSide& sd = SideRef(side);
         u32 size = static_cast<u32>(sd.levels.size());
         u32 idx;
-        if (allowPrune && size > cfg_.levelsPerSide) {
+        if (allow_prune && size > cfg_.levels_per_side) {
             idx = std::uniform_int_distribution<u32>(size - size / 4,
                                                      size - 1)(rng_);
         } else {
@@ -233,7 +234,7 @@ class Generator {
         Pick p = PickOrder(false);
         ShadowOrder& o = table_[p.id];
         i64 hi = std::min<i64>(2 * o.volume.lots,
-                               4 * static_cast<i64>(cfg_.maxVolume));
+                               4 * static_cast<i64>(cfg_.max_volume));
         Volume nv{std::uniform_int_distribution<i64>(1, hi)(rng_)};
         o.volume = nv;
         Emit(MsgType::Modify, o.side, o.price, p.id, nv, p.idx);
@@ -260,9 +261,9 @@ class Generator {
 
     void Step() {
         u32 roll = std::uniform_int_distribution<u32>(0, 99)(rng_);
-        if (roll < cfg_.addPct)
+        if (roll < cfg_.add_pct)
             DoAdd();
-        else if (roll < cfg_.addPct + cfg_.modifyPct)
+        else if (roll < cfg_.add_pct + cfg_.modify_pct)
             DoModify();
         else
             DoDelete();
@@ -271,32 +272,35 @@ class Generator {
     FeedConfig cfg_;
     std::mt19937_64 rng_;
     std::uniform_real_distribution<f64> uniform_{0.0, 1.0};
-    std::vector<u32>* depthOut_;
+    std::vector<u32>* depth_out_;
     std::vector<f64> cdf_;
     ShadowSide bids_;
     ShadowSide asks_;
     std::unordered_map<OrderId, ShadowOrder> table_;
     std::vector<Update> out_;
-    OrderId nextId_ = 1;
+    OrderId next_id_ = 1;
     u64 ts_ = 0;
 };
 
-} // namespace
+}
 
 std::vector<Update> GenerateFeed(const FeedConfig& cfg,
-                                 std::vector<u32>* depthOut) {
-    Generator g(cfg, depthOut);
+                                 std::vector<u32>* depth_out) {
+    Generator g(cfg, depth_out);
     return g.Run();
 }
 
 void WriteFeed(const std::string& path, const FeedConfig& cfg,
-               const std::vector<Update>& updates) {
+               const std::vector<Update>& updates,
+               const std::string& source) {
     FeedHeader h{};
-    h.magic = kFeedMagic;
-    h.version = kFeedVersion;
+    h.magic = FEED_MAGIC;
+    h.version = FEED_VERSION;
     h.pad = 0;
     h.config = cfg;
     h.count = updates.size();
+    std::memset(h.source, 0, sizeof h.source);
+    std::strncpy(h.source, source.c_str(), sizeof h.source - 1);
     std::FILE* f = std::fopen(path.c_str(), "wb");
     if (!f)
         throw std::runtime_error("cannot open " + path + ": " +
@@ -332,8 +336,8 @@ MappedFeed::MappedFeed(const std::string& path) {
         throw std::runtime_error("mmap failed on " + path);
     }
     header_ = static_cast<const FeedHeader*>(base_);
-    if (header_->magic != kFeedMagic ||
-        header_->version != kFeedVersion) {
+    if (header_->magic != FEED_MAGIC ||
+        header_->version != FEED_VERSION) {
         ::munmap(base_, bytes_);
         base_ = nullptr;
         throw std::runtime_error("bad feed header in " + path);
@@ -348,6 +352,11 @@ MappedFeed::MappedFeed(const std::string& path) {
         static_cast<const char*>(base_) + sizeof(FeedHeader));
 }
 
+std::string MappedFeed::source() const {
+    return std::string(header_->source,
+                       strnlen(header_->source, FEED_SOURCE_BYTES));
+}
+
 MappedFeed::~MappedFeed() {
     if (base_)
         ::munmap(base_, bytes_);
@@ -355,15 +364,16 @@ MappedFeed::~MappedFeed() {
 
 std::string DescribeConfig(const FeedConfig& cfg) {
     std::ostringstream os;
-    os << "seed=" << cfg.seed << " updateCount=" << cfg.updateCount
-       << " levelsPerSide=" << cfg.levelsPerSide
-       << " maxDepth=" << cfg.maxDepth << " midPrice=" << cfg.midPrice
-       << " ordersPerLevelSeed=" << cfg.ordersPerLevelSeed
-       << " depthExponent=" << cfg.depthExponent
-       << " newLevelRate=" << cfg.newLevelRate
-       << " mix=" << cfg.addPct << "/" << cfg.modifyPct << "/"
-       << cfg.deletePct << " maxVolume=" << cfg.maxVolume;
+    os << "seed=" << cfg.seed << " updateCount=" << cfg.update_count
+       << " levelsPerSide=" << cfg.levels_per_side
+       << " maxDepth=" << cfg.max_depth
+       << " midPrice=" << cfg.mid_price
+       << " ordersPerLevelSeed=" << cfg.orders_per_level_seed
+       << " depthExponent=" << cfg.depth_exponent
+       << " newLevelRate=" << cfg.new_level_rate
+       << " mix=" << cfg.add_pct << "/" << cfg.modify_pct << "/"
+       << cfg.delete_pct << " maxVolume=" << cfg.max_volume;
     return os.str();
 }
 
-} // namespace ob
+}
