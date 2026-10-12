@@ -70,13 +70,13 @@ inline u64 MonotonicNs() {
 }
 
 struct CounterInfo {
-    f64 ticksPerNs = 0.0;
-    f64 resolutionNs = 0.0;
+    f64 ticks_per_ns = 0.0;
+    f64 resolution_ns = 0.0;
     std::string source;
     bool invariant = false;
     bool coarse = false;
-    std::string invariantNote;
-    std::string cpuModel;
+    std::string invariant_note;
+    std::string cpu_model;
 };
 
 namespace detail {
@@ -117,17 +117,17 @@ inline void CheckInvariant(CounterInfo& info) {
         }
     }
     info.invariant = constant && nonstop;
-    info.invariantNote = info.invariant
+    info.invariant_note = info.invariant
                              ? "constant_tsc and nonstop_tsc present"
                              : "constant_tsc or nonstop_tsc missing";
     info.source = "rdtsc";
 #elif defined(__x86_64__)
     info.invariant = true;
-    info.invariantNote = "non linux x86: invariant tsc assumed";
+    info.invariant_note = "non linux x86: invariant tsc assumed";
     info.source = "rdtsc";
 #elif defined(__aarch64__)
     info.invariant = true;
-    info.invariantNote = "arm64 generic timer is fixed frequency";
+    info.invariant_note = "arm64 generic timer is fixed frequency";
     info.source = "cntvct_el0";
 #endif
 }
@@ -154,21 +154,21 @@ inline std::string Quote(const std::string& s) {
     return out;
 }
 
-} // namespace detail
+}
 
 inline CounterInfo CalibrateCounter() {
     CounterInfo info;
     detail::CheckInvariant(info);
-    info.cpuModel = detail::ReadCpuModel();
+    info.cpu_model = detail::ReadCpuModel();
 
-    const u64 spinNs = 100'000'000ull;
+    const u64 spin_ns = 100'000'000ull;
     u64 t0 = MonotonicNs();
     u64 c0 = ReadCounter();
     u64 t1 = t0;
-    while (t1 - t0 < spinNs)
+    while (t1 - t0 < spin_ns)
         t1 = MonotonicNs();
     u64 c1 = ReadCounter();
-    info.ticksPerNs =
+    info.ticks_per_ns =
         static_cast<f64>(c1 - c0) / static_cast<f64>(t1 - t0);
 
     const u64 probes = 1'000'000;
@@ -188,22 +188,22 @@ inline CounterInfo CalibrateCounter() {
     u64 granularity = 1;
     if (!deltas.empty()) {
         std::sort(deltas.begin(), deltas.end());
-        u64 bestRun = 0;
+        u64 best_run = 0;
         u64 run = 1;
         for (std::size_t i = 1; i <= deltas.size(); ++i) {
             if (i < deltas.size() && deltas[i] == deltas[i - 1]) {
                 ++run;
                 continue;
             }
-            if (run > bestRun) {
-                bestRun = run;
+            if (run > best_run) {
+                best_run = run;
                 granularity = deltas[i - 1];
             }
             run = 1;
         }
     }
-    info.resolutionNs =
-        static_cast<f64>(granularity) / info.ticksPerNs;
+    info.resolution_ns =
+        static_cast<f64>(granularity) / info.ticks_per_ns;
     info.coarse = zeros > probes / 2;
     return info;
 }
@@ -224,8 +224,8 @@ struct Summary {
     f64 max = 0;
     f64 mean = 0;
     f64 stddev = 0;
-    f64 modeValue = 0;
-    f64 modeFraction = 0;
+    f64 mode_value = 0;
+    f64 mode_fraction = 0;
 };
 
 inline Summary Summarize(std::span<const f64> samples) {
@@ -252,61 +252,61 @@ inline Summary Summarize(std::span<const f64> samples) {
         sq += (v - s.mean) * (v - s.mean);
     s.stddev = std::sqrt(sq / static_cast<f64>(sorted.size()));
 
-    std::size_t bestRun = 0;
-    f64 bestVal = sorted.front();
+    std::size_t best_run = 0;
+    f64 best_val = sorted.front();
     std::size_t run = 1;
     for (std::size_t i = 1; i < sorted.size(); ++i) {
         if (sorted[i] == sorted[i - 1]) {
             ++run;
         } else {
-            if (run > bestRun) {
-                bestRun = run;
-                bestVal = sorted[i - 1];
+            if (run > best_run) {
+                best_run = run;
+                best_val = sorted[i - 1];
             }
             run = 1;
         }
     }
-    if (run > bestRun) {
-        bestRun = run;
-        bestVal = sorted.back();
+    if (run > best_run) {
+        best_run = run;
+        best_val = sorted.back();
     }
-    s.modeValue = bestVal;
-    s.modeFraction =
-        static_cast<f64>(bestRun) / static_cast<f64>(sorted.size());
+    s.mode_value = best_val;
+    s.mode_fraction =
+        static_cast<f64>(best_run) / static_cast<f64>(sorted.size());
     return s;
 }
 
-constexpr u32 kHistogramBuckets = 500;
+constexpr u32 HISTOGRAM_BUCKETS = 500;
 
 struct Histogram {
-    std::array<u64, kHistogramBuckets + 1> buckets{};
+    std::array<u64, HISTOGRAM_BUCKETS + 1> buckets{};
     u64 total = 0;
-    f64 bucketNs = 1.0;
+    f64 bucket_ns = 1.0;
 
     f64 Median() const {
         if (total == 0)
             return 0;
         u64 half = (total + 1) / 2;
         u64 acc = 0;
-        for (u32 i = 0; i <= kHistogramBuckets; ++i) {
+        for (u32 i = 0; i <= HISTOGRAM_BUCKETS; ++i) {
             acc += buckets[i];
             if (acc >= half)
-                return static_cast<f64>(i) * bucketNs;
+                return static_cast<f64>(i) * bucket_ns;
         }
-        return static_cast<f64>(kHistogramBuckets) * bucketNs;
+        return static_cast<f64>(HISTOGRAM_BUCKETS) * bucket_ns;
     }
 };
 
 inline Histogram BuildHistogram(std::span<const f64> samples,
-                                f64 bucketNs = 1.0) {
+                                f64 bucket_ns = 1.0) {
     Histogram h;
-    h.bucketNs = bucketNs > 0 ? bucketNs : 1.0;
+    h.bucket_ns = bucket_ns > 0 ? bucket_ns : 1.0;
     for (f64 v : samples) {
         if (v < 0)
             v = 0;
-        f64 scaled = v / h.bucketNs;
-        u64 b = scaled >= static_cast<f64>(kHistogramBuckets)
-                    ? kHistogramBuckets
+        f64 scaled = v / h.bucket_ns;
+        u64 b = scaled >= static_cast<f64>(HISTOGRAM_BUCKETS)
+                    ? HISTOGRAM_BUCKETS
                     : static_cast<u64>(scaled);
         ++h.buckets[b];
     }
@@ -316,26 +316,31 @@ inline Histogram BuildHistogram(std::span<const f64> samples,
 
 struct RunMeta {
     std::string book;
+    std::string source;
     u64 seed = 0;
-    u64 updateCount = 0;
-    f64 newLevelRate = 0;
+    u64 update_count = 0;
+    f64 new_level_rate = 0;
     std::string compiler;
     std::string flags;
-    std::string cpuModel;
-    f64 ticksPerNs = 0;
-    f64 resolutionNs = 0;
-    u64 blockSize = 1;
-    f64 emptyLoopNs = 0;
-    u64 warmupExcluded = 0;
-    u64 allocsInTimedRegion = 0;
-    std::string gitCommit;
+    std::string cpu_model;
+    f64 ticks_per_ns = 0;
+    f64 resolution_ns = 0;
+    u64 block_size = 1;
+    u64 repeat = 1;
+    u64 scramble = 0;
+    f64 empty_loop_ns = 0;
+    u64 warmup_excluded = 0;
+    u64 allocs_in_timed_region = 0;
+    std::string git_commit;
     std::string timestamp;
 };
 
 inline std::string SummaryCsvHeader() {
-    return "book,seed,update_count,new_level_rate,compiler,flags,"
-           "cpu_model,ticks_per_ns,resolution_ns,block_size,"
-           "empty_loop_ns,warmup_excluded,allocs_in_timed_region,"
+    return "book,source,seed,update_count,new_level_rate,compiler,"
+           "flags,"
+           "cpu_model,ticks_per_ns,resolution_ns,block_size,repeat,"
+           "scramble,empty_loop_ns,warmup_excluded,allocs_in_timed_"
+           "region,"
            "git_commit,timestamp,count,min,median,p75,p90,p99,p999,"
            "p9999,max,mean,stddev";
 }
@@ -344,13 +349,15 @@ inline std::string SummaryCsvRow(const RunMeta& m, const Summary& s) {
     std::ostringstream os;
     os.precision(6);
     os << std::fixed;
-    os << detail::Quote(m.book) << ',' << m.seed << ','
-       << m.updateCount << ',' << m.newLevelRate << ','
-       << detail::Quote(m.compiler) << ',' << detail::Quote(m.flags)
-       << ',' << detail::Quote(m.cpuModel) << ',' << m.ticksPerNs
-       << ',' << m.resolutionNs << ',' << m.blockSize << ','
-       << m.emptyLoopNs << ',' << m.warmupExcluded << ','
-       << m.allocsInTimedRegion << ',' << detail::Quote(m.gitCommit)
+    os << detail::Quote(m.book) << ',' << detail::Quote(m.source)
+       << ',' << m.seed << ',' << m.update_count << ','
+       << m.new_level_rate << ',' << detail::Quote(m.compiler) << ','
+       << detail::Quote(m.flags) << ',' << detail::Quote(m.cpu_model)
+       << ',' << m.ticks_per_ns << ',' << m.resolution_ns << ','
+       << m.block_size << ',' << m.repeat << ',' << m.scramble << ','
+       << m.empty_loop_ns << ',' << m.warmup_excluded << ','
+       << m.allocs_in_timed_region << ','
+       << detail::Quote(m.git_commit)
        << ',' << detail::Quote(m.timestamp) << ',' << s.count << ','
        << s.min << ',' << s.median << ',' << s.p75 << ',' << s.p90
        << ',' << s.p99 << ',' << s.p999 << ',' << s.p9999 << ','
@@ -380,8 +387,9 @@ inline void WriteHistogramCsv(const std::string& path,
     if (!out)
         throw std::runtime_error("cannot open " + path);
     out << "ns,count\n";
-    for (u32 i = 0; i <= kHistogramBuckets; ++i)
-        out << static_cast<f64>(i) * h.bucketNs << ',' << h.buckets[i]
+    for (u32 i = 0; i <= HISTOGRAM_BUCKETS; ++i)
+        out << static_cast<f64>(i) * h.bucket_ns << ','
+            << h.buckets[i]
             << '\n';
 }
 
@@ -396,21 +404,65 @@ inline void WriteRawCsv(const std::string& path,
 }
 
 struct RunConfig {
-    u64 blockSize = 1;
-    f64 warmupFraction = 0.01;
-    u64 emptyLoopSamples = 1'000'000;
+    u64 block_size = 1;
+    f64 warmup_fraction = 0.01;
+    u64 empty_loop_samples = 1'000'000;
+    u64 repeat = 1;
 };
 
 struct RunResult {
     std::vector<u32> ticks;
-    u64 blockSize = 1;
-    u64 updatesReplayed = 0;
-    u64 warmupSamples = 0;
-    f64 emptyLoopMedianTicks = 0;
-    u64 allocsStart = 0;
-    u64 allocsAfterWarmup = 0;
-    u64 allocsEnd = 0;
+    u64 block_size = 1;
+    u64 updates_replayed = 0;
+    u64 warmup_samples = 0;
+    f64 empty_loop_median_ticks = 0;
+    u64 allocs_start = 0;
+    u64 allocs_after_warmup = 0;
+    u64 allocs_end = 0;
+    u64 passes = 1;
+    std::vector<f64> pass_median_ticks;
 };
+
+inline void PrefaultHeap(u64 blocks) {
+    std::vector<void*> held;
+    held.reserve(blocks);
+    for (u64 i = 0; i < blocks; ++i)
+        held.push_back(::operator new(32 + (i % 4) * 16));
+    for (void* p : held)
+        ::operator delete(p);
+}
+
+inline void ScrambleHeap(u64 blocks, u64 seed = 7) {
+    static std::vector<void*> kept;
+    std::vector<void*> all;
+    all.reserve(blocks);
+    u64 state = seed ^ 0x9e3779b97f4a7c15ull;
+    for (u64 i = 0; i < blocks; ++i) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        all.push_back(::operator new(48 + (state % 3) * 16));
+    }
+    for (u64 i = blocks; i > 1; --i) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        std::swap(all[i - 1], all[state % i]);
+    }
+    for (u64 i = 0; i < blocks; ++i) {
+        if (i % 2 == 0)
+            ::operator delete(all[i]);
+        else
+            kept.push_back(all[i]);
+    }
+}
+
+inline f64 MedianOf(std::vector<u32> v) {
+    if (v.empty())
+        return 0;
+    std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+    return static_cast<f64>(v[v.size() / 2]);
+}
 
 template<class Book>
 inline void CrossCheck(Book& book, const Update& u) {
@@ -430,16 +482,15 @@ inline void CrossCheck(Book& book, const Update& u) {
 
 template<class Book>
 inline void ReplayRange(Book& book, const Update* updates, u64 block,
-                        u64 fromSample, u64 toSample, u32* out) {
-    for (u64 s = fromSample; s < toSample; ++s) {
+                        u64 from_sample, u64 to_sample, u32* out) {
+    for (u64 s = from_sample; s < to_sample; ++s) {
         const Update* u = updates + s * block;
         const Update* end = u + block;
-#ifndef NDEBUG
-        for (const Update* c = u; c < end; ++c)
-            CrossCheck(book, *c);
-#endif
         u64 t0 = ReadCounter();
         for (; u < end; ++u) {
+#ifndef NDEBUG
+            CrossCheck(book, *u);
+#endif
             ApplyUpdate(book, *u);
             ObserveBook(book);
         }
@@ -475,9 +526,9 @@ template<class Book>
 RunResult Replay(Book& book, const Update* updates, u64 count,
                  const RunConfig& cfg) {
     RunResult r;
-    r.blockSize = cfg.blockSize == 0 ? 1 : cfg.blockSize;
-    u64 samples = count / r.blockSize;
-    r.updatesReplayed = samples * r.blockSize;
+    r.block_size = cfg.block_size == 0 ? 1 : cfg.block_size;
+    u64 samples = count / r.block_size;
+    r.updates_replayed = samples * r.block_size;
     r.ticks.assign(samples, 0);
 
     u64 touch = 0;
@@ -485,34 +536,100 @@ RunResult Replay(Book& book, const Update* updates, u64 count,
         touch += updates[i].id ^ updates[i].timestamp;
     DoNotOptimize(touch);
 
-    u64 emptySamples = std::min(samples, cfg.emptyLoopSamples);
-    r.emptyLoopMedianTicks =
-        EmptyLoopMedianTicks(updates, r.blockSize, emptySamples);
+    u64 empty_samples = std::min(samples, cfg.empty_loop_samples);
+    r.empty_loop_median_ticks =
+        EmptyLoopMedianTicks(updates, r.block_size, empty_samples);
 
-    r.warmupSamples = static_cast<u64>(static_cast<f64>(samples) *
-                                       cfg.warmupFraction);
-    if (r.warmupSamples > samples)
-        r.warmupSamples = samples;
+    r.warmup_samples = static_cast<u64>(static_cast<f64>(samples) *
+                                       cfg.warmup_fraction);
+    if (r.warmup_samples > samples)
+        r.warmup_samples = samples;
 
-    r.allocsStart = AllocationCount();
-    ReplayRange(book, updates, r.blockSize, 0, r.warmupSamples,
+    r.allocs_start = AllocationCount();
+    ReplayRange(book, updates, r.block_size, 0, r.warmup_samples,
                 r.ticks.data());
-    r.allocsAfterWarmup = AllocationCount();
-    ReplayRange(book, updates, r.blockSize, r.warmupSamples, samples,
-                r.ticks.data());
-    r.allocsEnd = AllocationCount();
+    r.allocs_after_warmup = AllocationCount();
+    ReplayRange(book, updates, r.block_size, r.warmup_samples,
+                samples, r.ticks.data());
+    r.allocs_end = AllocationCount();
     return r;
 }
 
+template<class Book>
+RunResult ReplayPasses(const Update* updates, u64 count,
+                       const RunConfig& cfg) {
+    u64 passes = cfg.repeat == 0 ? 1 : cfg.repeat;
+    u64 block = cfg.block_size == 0 ? 1 : cfg.block_size;
+    u64 per_pass = count / block;
+    RunResult r;
+    r.block_size = block;
+    r.passes = passes;
+    r.updates_replayed = per_pass * block * passes;
+    r.ticks.assign(per_pass * passes, 0);
+    r.warmup_samples = static_cast<u64>(
+        static_cast<f64>(per_pass * passes) * cfg.warmup_fraction);
+    if (r.warmup_samples > per_pass)
+        r.warmup_samples = per_pass;
+
+    u64 touch = 0;
+    for (u64 i = 0; i < count; ++i)
+        touch += updates[i].id ^ updates[i].timestamp;
+    DoNotOptimize(touch);
+
+    u64 empty_samples = std::min(per_pass, cfg.empty_loop_samples);
+    r.empty_loop_median_ticks =
+        EmptyLoopMedianTicks(updates, block, empty_samples);
+
+    r.pass_median_ticks.reserve(passes);
+    std::vector<u32> scratch(per_pass);
+    r.allocs_start = AllocationCount();
+    for (u64 p = 0; p < passes; ++p) {
+        Book book;
+        u32* out = r.ticks.data() + p * per_pass;
+        if (p == 0) {
+            ReplayRange(book, updates, block, 0, r.warmup_samples,
+                        out);
+            r.allocs_after_warmup = AllocationCount();
+            ReplayRange(book, updates, block, r.warmup_samples,
+                        per_pass, out);
+        } else {
+            ReplayRange(book, updates, block, 0, per_pass, out);
+        }
+    }
+    r.allocs_end = AllocationCount();
+    for (u64 p = 0; p < passes; ++p) {
+        const u32* out = r.ticks.data() + p * per_pass;
+        std::copy(out, out + per_pass, scratch.begin());
+        r.pass_median_ticks.push_back(MedianOf(scratch));
+    }
+    return r;
+}
+
+inline std::vector<f64> Dither(std::span<const f64> samples,
+                               f64 quantum, u64 seed) {
+    std::vector<f64> out(samples.begin(), samples.end());
+    if (quantum <= 0)
+        return out;
+    u64 state = seed ^ 0x9e3779b97f4a7c15ull;
+    for (f64& v : out) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        f64 unit = static_cast<f64>(state >> 11) / 9007199254740992.0;
+        v += unit * quantum;
+    }
+    return out;
+}
+
 inline std::vector<f64> TicksToNsPerUpdate(const RunResult& r,
-                                           f64 ticksPerNs) {
+                                           f64 ticks_per_ns) {
     std::vector<f64> ns(r.ticks.size());
-    f64 scale = 1.0 / (ticksPerNs * static_cast<f64>(r.blockSize));
+    f64 scale = 1.0 / (ticks_per_ns * static_cast<f64>(r.block_size));
     for (std::size_t i = 0; i < ns.size(); ++i)
         ns[i] = static_cast<f64>(r.ticks[i]) * scale;
     return ns;
 }
 
-} // namespace ob
+}
 
 #endif
