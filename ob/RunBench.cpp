@@ -1,15 +1,25 @@
 #include "ob/Bench.hpp"
+#include "ob/Books.hpp"
 #include "ob/Feed.hpp"
-#include "ob/StubBook.hpp"
 
 #include <cstdlib>
 #include <ctime>
 #include <iostream>
 #include <string>
 
+#include <sys/wait.h>
+#include <unistd.h>
+
 #if defined(__APPLE__)
 #include <pthread.h>
+#include <spawn.h>
 #include <sys/qos.h>
+#ifndef _POSIX_SPAWN_DISABLE_ASLR
+#define _POSIX_SPAWN_DISABLE_ASLR 0x0100
+#endif
+extern char** environ;
+#elif defined(__linux__)
+#include <sys/personality.h>
 #endif
 
 #ifndef OB_GIT_COMMIT
@@ -29,19 +39,59 @@ struct Args {
     std::string summary = "results/summary.csv";
     std::string hist;
     std::string raw;
-    bool allowNonInvariant = false;
+    bool allow_non_invariant = false;
     ob::u64 limit = 0;
-    double bucketNs = 1.0;
+    double bucket_ns = 1.0;
+    ob::u64 repeat = 1;
+    ob::u64 prefault = 0;
+    ob::u64 scramble = 0;
+    bool no_aslr = false;
+    bool no_dither = false;
 };
+
+int g_anchor = 0;
+
+int ReexecWithoutAslr(char** argv) {
+    if (std::getenv("OB_ASLR_DISABLED"))
+        return -1;
+    setenv("OB_ASLR_DISABLED", "1", 1);
+#if defined(__APPLE__)
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, _POSIX_SPAWN_DISABLE_ASLR);
+    pid_t pid = 0;
+    int rc =
+        posix_spawn(&pid, argv[0], nullptr, &attr, argv, environ);
+    posix_spawnattr_destroy(&attr);
+    if (rc != 0) {
+        std::cerr << "warning: could not re-exec without ASLR (" << rc
+                  << "), continuing with ASLR\n";
+        return -1;
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+#elif defined(__linux__)
+    if (personality(ADDR_NO_RANDOMIZE) == -1)
+        return -1;
+    execv("/proc/self/exe", argv);
+    return -1;
+#else
+    (void)argv;
+    return -1;
+#endif
+}
 
 void Usage() {
     std::cerr
-        << "usage: ob_bench --feed PATH [--book stub] [--block "
+        << "usage: ob_bench --feed PATH [--book NAME] [--block "
            "auto|N]\n"
            "                [--summary PATH] [--hist PATH] [--raw "
            "PATH]\n"
            "                [--name LABEL] [--limit N] "
            "[--bucket-ns F]\n"
+           "                [--repeat N] [--prefault N] "
+           "[--scramble N] [--no-aslr] [--no-dither]\n"
            "                [--allow-noninvariant]\n";
 }
 
@@ -54,32 +104,32 @@ std::string NowUtc() {
 }
 
 ob::u64 ChooseBlock(const Args& a, const ob::CounterInfo& ci,
-                    double pilotNsPerUpdate) {
+                    double pilot_ns_per_update) {
     if (a.block != "auto")
         return std::stoull(a.block);
     if (!ci.coarse)
         return 1;
-    double target = 200.0 * ci.resolutionNs;
+    double target = 200.0 * ci.resolution_ns;
     ob::u64 n = 1;
-    while (static_cast<double>(n) * pilotNsPerUpdate < target)
+    while (static_cast<double>(n) * pilot_ns_per_update < target)
         n <<= 1;
     return n;
 }
 
 template<class Book>
 double PilotNsPerUpdate(const ob::Update* updates, ob::u64 count,
-                        double ticksPerNs) {
+                        double ticks_per_ns) {
     Book book;
     ob::RunConfig cfg;
-    cfg.blockSize = 1024;
-    cfg.warmupFraction = 0.0;
-    cfg.emptyLoopSamples = 0;
+    cfg.block_size = 1024;
+    cfg.warmup_fraction = 0.0;
+    cfg.empty_loop_samples = 0;
     ob::u64 n = std::min<ob::u64>(count, 1'000'000);
-    n -= n % cfg.blockSize;
+    n -= n % cfg.block_size;
     if (n == 0)
         return 1.0;
     ob::RunResult r = ob::Replay(book, updates, n, cfg);
-    std::vector<double> ns = ob::TicksToNsPerUpdate(r, ticksPerNs);
+    std::vector<double> ns = ob::TicksToNsPerUpdate(r, ticks_per_ns);
     ob::Summary s = ob::Summarize(ns);
     return s.median > 0 ? s.median : 1.0;
 }
@@ -92,82 +142,131 @@ int RunBook(const Args& a, const ob::MappedFeed& feed,
         count = a.limit;
 
     double pilot =
-        PilotNsPerUpdate<Book>(feed.data(), count, ci.ticksPerNs);
+        PilotNsPerUpdate<Book>(feed.data(), count, ci.ticks_per_ns);
     ob::RunConfig cfg;
-    cfg.blockSize = ChooseBlock(a, ci, pilot);
+    cfg.block_size = ChooseBlock(a, ci, pilot);
 
-    Book book;
-    ob::RunResult r = ob::Replay(book, feed.data(), count, cfg);
-    std::vector<double> ns = ob::TicksToNsPerUpdate(r, ci.ticksPerNs);
-    std::span<const double> measured(ns.data() + r.warmupSamples,
-                                     ns.size() - r.warmupSamples);
+    cfg.repeat = a.repeat;
+    if (a.prefault > 0)
+        ob::PrefaultHeap(a.prefault);
+    if (a.scramble > 0)
+        ob::ScrambleHeap(a.scramble);
+    ob::u64 adds_per_pass = 0;
+    for (ob::u64 i = 0; i < count; ++i)
+        adds_per_pass += feed.data()[i].type == ob::MsgType::Add;
+
+    ob::RunResult r = ob::ReplayPasses<Book>(feed.data(), count, cfg);
+    std::vector<double> ns =
+        ob::TicksToNsPerUpdate(r, ci.ticks_per_ns);
+    std::span<const double> measured(ns.data() + r.warmup_samples,
+                                     ns.size() - r.warmup_samples);
     ob::Summary s = ob::Summarize(measured);
-    ob::Histogram h = ob::BuildHistogram(measured, a.bucketNs);
+    double quantum =
+        ci.coarse && r.block_size > 1
+            ? ci.resolution_ns / static_cast<double>(r.block_size)
+            : 0.0;
+    bool dithered = quantum > 0 && !a.no_dither;
+    std::vector<double> for_hist =
+        dithered
+            ? ob::Dither(measured, quantum, feed.config().seed + 1)
+            : std::vector<double>(measured.begin(), measured.end());
+    ob::Histogram h = ob::BuildHistogram(for_hist, a.bucket_ns);
 
     ob::RunMeta m;
-    m.book = a.name.empty() ? std::string(Book::kName) : a.name;
+    m.book = a.name.empty() ? std::string(Book::NAME) : a.name;
+    m.source = feed.source();
     m.seed = feed.config().seed;
-    m.updateCount = r.updatesReplayed;
-    m.newLevelRate = feed.config().newLevelRate;
+    m.update_count = r.updates_replayed;
+    m.new_level_rate = feed.config().new_level_rate;
     m.compiler = __VERSION__;
     m.flags = OB_CXX_FLAGS;
-    m.cpuModel = ci.cpuModel;
-    m.ticksPerNs = ci.ticksPerNs;
-    m.resolutionNs = ci.resolutionNs;
-    m.blockSize = r.blockSize;
-    m.emptyLoopNs = r.emptyLoopMedianTicks / ci.ticksPerNs;
-    m.warmupExcluded = r.warmupSamples;
-    m.allocsInTimedRegion = r.allocsEnd - r.allocsAfterWarmup;
-    m.gitCommit = OB_GIT_COMMIT;
+    m.cpu_model = ci.cpu_model;
+    m.ticks_per_ns = ci.ticks_per_ns;
+    m.resolution_ns = ci.resolution_ns;
+    m.block_size = r.block_size;
+    m.repeat = r.passes;
+    m.scramble = a.scramble;
+    m.empty_loop_ns = r.empty_loop_median_ticks / ci.ticks_per_ns;
+    m.warmup_excluded = r.warmup_samples;
+    m.allocs_in_timed_region = r.allocs_end - r.allocs_after_warmup;
+    m.git_commit = OB_GIT_COMMIT;
     m.timestamp = NowUtc();
 
-    std::cout << "book:              " << m.book << '\n'
-              << "feed:              " << a.feed << '\n'
-              << "feed config:       "
-              << ob::DescribeConfig(feed.config()) << '\n'
-              << "updates replayed:  " << r.updatesReplayed << '\n'
-              << "compiler:          " << m.compiler << '\n'
-              << "flags:             " << m.flags << '\n'
-              << "cpu:               " << m.cpuModel << '\n'
-              << "counter:           " << ci.source << ", "
-              << ci.ticksPerNs << " ticks/ns, observed resolution "
-              << ci.resolutionNs << " ns, "
-              << (ci.coarse ? "coarse" : "fine") << '\n'
-              << "invariant:         " << ci.invariantNote << '\n'
-              << "block size:        " << r.blockSize
-              << " updates per sample\n"
-              << "samples:           " << r.ticks.size() << " total, "
-              << r.warmupSamples << " warmup excluded (1%)\n"
-              << "empty loop:        " << m.emptyLoopNs
-              << " ns per block median, not subtracted\n"
-              << "allocations:       "
-              << (r.allocsAfterWarmup - r.allocsStart)
-              << " during warmup, " << m.allocsInTimedRegion
-              << " after warmup\n"
-              << "git commit:        " << m.gitCommit << '\n'
-              << "timestamp:         " << m.timestamp << '\n'
-              << "ns per update:     count=" << s.count
-              << " min=" << s.min << " median=" << s.median
-              << " p75=" << s.p75 << " p90=" << s.p90
-              << " p99=" << s.p99 << " p99.9=" << s.p999
-              << " p99.99=" << s.p9999 << " max=" << s.max
-              << " mean=" << s.mean << " stddev=" << s.stddev << '\n';
+    std::cout
+        << "book:              " << m.book << '\n'
+        << "feed:              " << a.feed << " (" << m.source
+        << ")\n"
+        << "feed config:       " << ob::DescribeConfig(feed.config())
+        << '\n'
+        << "updates replayed:  " << r.updates_replayed << '\n'
+        << "compiler:          " << m.compiler << '\n'
+        << "flags:             " << m.flags << '\n'
+        << "cpu:               " << m.cpu_model << '\n'
+        << "counter:           " << ci.source << ", "
+        << ci.ticks_per_ns
+        << " ticks/ns, observed resolution " << ci.resolution_ns
+        << " ns, " << (ci.coarse ? "coarse" : "fine") << '\n'
+        << "invariant:         " << ci.invariant_note << '\n'
+        << "block size:        " << r.block_size
+        << " updates per sample\n"
+        << "passes:            " << r.passes
+        << " over the feed, fresh book per pass\n"
+        << "prefault:          " << a.prefault
+        << " heap blocks allocated and freed before timing\n"
+        << "scramble:          " << a.scramble
+        << " heap blocks, half freed in shuffled order, half kept\n"
+        << "aslr:              "
+        << (std::getenv("OB_ASLR_DISABLED") ? "disabled" : "enabled")
+        << ", anchor address " << static_cast<void*>(&g_anchor)
+        << '\n'
+        << "histogram:         "
+        << (dithered ? "dithered by up to "
+                     : "not dithered, quantum ")
+        << quantum << " ns\n"
+        << "samples:           " << r.ticks.size() << " total, "
+        << r.warmup_samples << " warmup excluded (1%)\n"
+        << "empty loop:        " << m.empty_loop_ns
+        << " ns per block median, not subtracted\n"
+        << "allocations:       "
+        << (r.allocs_after_warmup - r.allocs_start)
+        << " during warmup, "
+        << m.allocs_in_timed_region << " after warmup, "
+        << (adds_per_pass > 0
+                ? static_cast<double>(m.allocs_in_timed_region) /
+                      static_cast<double>(adds_per_pass * r.passes)
+                : 0.0)
+        << " per add\n"
+        << "git commit:        " << m.git_commit << '\n'
+        << "timestamp:         " << m.timestamp << '\n'
+        << "ns per update:     count=" << s.count << " min=" << s.min
+        << " median=" << s.median << " p75=" << s.p75
+        << " p90=" << s.p90 << " p99=" << s.p99 << " p99.9=" << s.p999
+        << " p99.99=" << s.p9999 << " max=" << s.max
+        << " mean=" << s.mean << " stddev=" << s.stddev << '\n';
+    if (r.passes > 1) {
+        std::cout << "pass medians:     ";
+        for (double t : r.pass_median_ticks)
+            std::cout << ' '
+                      << t / (ci.ticks_per_ns *
+                              static_cast<double>(r.block_size));
+        std::cout << " ns\n";
+    }
 
     int rc = 0;
-    if (!Book::kIsStub && s.median < 5.0)
+    if (!Book::IS_STUB && s.median < 5.0)
         std::cout << "WARN: median below 5 ns, the work is probably "
                      "being optimized away\n";
-    if (s.modeFraction > 0.5)
-        std::cout << "WARN: " << s.modeFraction * 100
-                  << "% of samples share the value " << s.modeValue
+    if (s.mode_fraction > 0.5)
+        std::cout << "WARN: " << s.mode_fraction * 100
+                  << "% of samples share the value " << s.mode_value
                   << " ns, hard floor from a coarse counter or bad "
                      "calibration\n";
     if (s.median > 0 && s.p9999 > 100.0 * s.median)
         std::cout << "WARN: p99.99 exceeds 100x the median, look for "
                      "page faults or allocations\n";
-    if (Book::kNoAllocations && m.allocsInTimedRegion > 0) {
+    if (Book::NO_ALLOCATIONS && m.allocs_in_timed_region > 0) {
         std::cout
-            << "FAIL: " << m.allocsInTimedRegion
+            << "FAIL: " << m.allocs_in_timed_region
             << " allocations inside the timed region for a book "
                "that promises none\n";
         rc = 2;
@@ -180,7 +279,7 @@ int RunBook(const Args& a, const ob::MappedFeed& feed,
     std::string hist =
         a.hist.empty() ? "results/hist_" + m.book + ".csv" : a.hist;
     ob::WriteHistogramCsv(hist, h);
-    std::cout << "histogram written: " << hist << " (" << h.bucketNs
+    std::cout << "histogram written: " << hist << " (" << h.bucket_ns
               << " ns buckets)\n";
     if (!a.raw.empty()) {
         ob::WriteRawCsv(a.raw, ns);
@@ -189,7 +288,7 @@ int RunBook(const Args& a, const ob::MappedFeed& feed,
     return rc;
 }
 
-} // namespace
+}
 
 int main(int argc, char** argv) {
     Args a;
@@ -219,9 +318,19 @@ int main(int argc, char** argv) {
         else if (s == "--limit")
             a.limit = std::stoull(next("--limit"));
         else if (s == "--bucket-ns")
-            a.bucketNs = std::stod(next("--bucket-ns"));
+            a.bucket_ns = std::stod(next("--bucket-ns"));
+        else if (s == "--repeat")
+            a.repeat = std::stoull(next("--repeat"));
+        else if (s == "--prefault")
+            a.prefault = std::stoull(next("--prefault"));
+        else if (s == "--scramble")
+            a.scramble = std::stoull(next("--scramble"));
+        else if (s == "--no-aslr")
+            a.no_aslr = true;
+        else if (s == "--no-dither")
+            a.no_dither = true;
         else if (s == "--allow-noninvariant")
-            a.allowNonInvariant = true;
+            a.allow_non_invariant = true;
         else if (s == "--help" || s == "-h") {
             Usage();
             return 0;
@@ -235,21 +344,33 @@ int main(int argc, char** argv) {
         Usage();
         return 1;
     }
+    if (a.no_aslr) {
+        int rc = ReexecWithoutAslr(argv);
+        if (rc >= 0)
+            return rc;
+    }
 #if defined(__APPLE__)
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
     try {
         ob::CounterInfo ci = ob::CalibrateCounter();
-        if (!ci.invariant && !a.allowNonInvariant) {
-            std::cerr << "refusing to run: " << ci.invariantNote
+        if (!ci.invariant && !a.allow_non_invariant) {
+            std::cerr << "refusing to run: " << ci.invariant_note
                       << " (pass --allow-noninvariant to override)\n";
             return 3;
         }
         ob::MappedFeed feed(a.feed);
-        if (a.book == "stub")
-            return RunBook<ob::StubBook>(a, feed, ci);
-        std::cerr << "unknown book " << a.book << " (known: stub)\n";
-        return 1;
+        int rc = 0;
+        bool known = ob::DispatchBook(a.book, [&](auto tag) {
+            using B = typename decltype(tag)::type;
+            rc = RunBook<B>(a, feed, ci);
+        });
+        if (!known) {
+            std::cerr << "unknown book " << a.book
+                      << " (known: " << ob::KnownBooks() << ")\n";
+            return 1;
+        }
+        return rc;
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << '\n';
         return 1;
