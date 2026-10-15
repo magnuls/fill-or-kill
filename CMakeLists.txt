@@ -54,6 +54,8 @@ if(OB_ASAN)
     string(STRIP "${OB_CXX_FLAGS} -fsanitize=address,undefined" OB_CXX_FLAGS)
 endif()
 
+find_package(ZLIB REQUIRED)
+
 enable_testing()
 
 add_subdirectory(matching)
@@ -70,8 +72,23 @@ target_compile_definitions(
     PRIVATE OB_GIT_COMMIT="${OB_GIT_COMMIT}" OB_CXX_FLAGS="${OB_CXX_FLAGS}"
 )
 
-add_executable(ob_tests tests/ObTests.cpp ob/Feed.cpp ob/AllocCounter.cpp)
+add_executable(ob_itch ob/ItchConvert.cpp ob/Feed.cpp)
+target_include_directories(ob_itch PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(ob_itch PRIVATE ZLIB::ZLIB)
+target_compile_options(ob_itch PRIVATE -Wall -Wextra)
+
+add_executable(ob_validate ob/Validate.cpp ob/Feed.cpp ob/AllocCounter.cpp)
+target_include_directories(ob_validate PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(ob_validate PRIVATE -Wall -Wextra)
+
+add_executable(ob_diff ob/Diff.cpp ob/Feed.cpp ob/AllocCounter.cpp)
+target_include_directories(ob_diff PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(ob_diff PRIVATE -Wall -Wextra)
+
+add_executable(ob_tests tests/ObTests.cpp ob/Feed.cpp ob/ItchConvert.cpp ob/AllocCounter.cpp)
 target_include_directories(ob_tests PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(ob_tests PRIVATE ZLIB::ZLIB)
+target_compile_definitions(ob_tests PRIVATE OB_ITCH_NO_MAIN)
 target_compile_options(ob_tests PRIVATE -Wall -Wextra -UNDEBUG)
 
 add_test(NAME ob COMMAND ob_tests)
