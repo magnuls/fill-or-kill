@@ -6,24 +6,25 @@
 
 ## Overview
 
-Follows David Gross, *When Nanoseconds Matter* (CppCon 2024).  Milestones 1 (harness) and 2 (three book designs) are done and measured.
+Heavily inspired by [David Gross CppCon talk](https://www.youtube.com/watch?v=sX2nF1fW7kI)
 
 - Feeds
-  - `ob_genfeed` writes a synthetic feed with Zipf depth, tunable mix and new level rate
+  - `ob_genfeed` writes a synthetic and customizable feed for benchmarking
   - `ob_itch` converts a Nasdaq ITCH 5.0 day file into one feed per symbol
-  - `ob_validate` replays a feed through the reference book and checks every invariant
+  - `ob_validate` checks that feed makes sense before it is used for benchmarking
 - Books (`ob/`)
-  - `ReferenceBook`: map of price to map of order, the correctness oracle
-  - `MapBook`: `std::map` per side, level iterator stored per order
-  - `VectorBook`: sorted vector per side, best price at the front
-  - `ReverseVectorBook`: best price at the back, with `lower_bound`, branchless and linear search policies
-  - `StubBook`: a counter, used to prove the harness can resolve a single increment
-- Harness (`ob_bench`)
-  - Cycle counter around blocks of updates, warmup excluded, allocation counting inside the timed region
-  - Heap prefault and scramble, ASLR off, dithered histogram, five launch spread gate.
+  - `ReferenceBook`: a slow but correct book used by ob_diff to check against our fast books
+  - `MapBook`: `std::map` map<price, volume> for bids and asks and a
+     hash table of orders. Each order holds an iterator to its price level, modifying or deleting O(1) on average
+  - `VectorBook`: sorted vector of price levels with best price at front of vector. The search algo used for finding a price level is a template parameter (lower_bound, branchless, linear)
+  - `ReverseVectorBook`: same as VectorBook but best price is located at the back
+  - `StubBook`: a book that does nothing but increment a counter. Benchmarking it measures the benchmark's own overhead and noise.
+- Benchmark (`ob_bench`)
+  - times blocks of updates with the CPU cycle counter, drops first ~1% of samples, counts total heap allocation calls
+  - Pre-grow heap to avoid page faults, optionally scramble which blocks you allocate, ASLR turned off (memory layout is the same every run), run five times, and if the difference between medians > 5% we flag the run as invalid
 - Correctness
-  - `ob_diff` replays every book against the reference in lockstep and stops at the first divergence
-  - `ob_tests` covers every book, the ITCH framing, validate and diff
+  - `ob_diff` feeds the same data feed into the ReferenceBook and a fast book at the same time, compares the two after every message, and stops at a difference
+  - `ob_tests` unit tests for every book, the ITCH parser, the feed validator, and ob_diff. Includes one broken book to make sure the test works
 - Results, 1.6M updates, M4 Max (My Chip), clang 17 `-O2`
 
   | book | median ns | allocations per add |
