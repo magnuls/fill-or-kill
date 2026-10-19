@@ -121,11 +121,10 @@ class ReverseSide {
     std::vector<Level> levels_;
 };
 
-template<class Search>
+template<class Search, template<class> class Table>
 class ReverseVectorBook {
   public:
     static constexpr const char* NAME = Search::NAME;
-    static constexpr bool NO_ALLOCATIONS = false;
     static constexpr bool IS_STUB = false;
 
     struct Rec {
@@ -134,9 +133,12 @@ class ReverseVectorBook {
         Volume volume;
     };
 
-    ReverseVectorBook() {
-        orders_.Reserve(1 << 16);
-    }
+    static constexpr const char* TABLE_NAME = Table<Rec>::NAME;
+    static constexpr bool NO_ALLOCATIONS = Table<Rec>::NO_ALLOCATIONS;
+
+    explicit ReverseVectorBook(
+        u64 order_reserve = DEFAULT_ORDER_RESERVE)
+        : orders_(order_reserve) {}
 
     void OnAdd(OrderId id, Side side, Price price, Volume volume) {
         auto [rec, inserted] = orders_.TryInsert(id);
@@ -214,15 +216,26 @@ class ReverseVectorBook {
         return orders_.Size();
     }
 
+    void Prefetch(OrderId id) const {
+        orders_.Prefetch(id);
+    }
+
+    TableStats OrderTableStats() const {
+        return orders_.Stats();
+    }
+
   private:
     ReverseSide<BidBetter, Search> bids_;
     ReverseSide<AskBetter, Search> asks_;
-    OrderTable<Rec> orders_;
+    Table<Rec> orders_;
 };
 
-using ReverseLowerBoundBook = ReverseVectorBook<LowerBoundSearch>;
-using ReverseBranchlessBook = ReverseVectorBook<BranchlessSearch>;
-using ReverseLinearBook = ReverseVectorBook<LinearSearch>;
+using ReverseLowerBoundBook =
+    ReverseVectorBook<LowerBoundSearch, StdOrderTable>;
+using ReverseBranchlessBook =
+    ReverseVectorBook<BranchlessSearch, StdOrderTable>;
+using ReverseLinearBook =
+    ReverseVectorBook<LinearSearch, StdOrderTable>;
 
 }
 

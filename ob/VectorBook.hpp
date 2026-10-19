@@ -72,10 +72,10 @@ class ForwardSide {
     std::vector<Level> levels_;
 };
 
-class VectorBook {
+template<template<class> class Table>
+class VectorBookT {
   public:
     static constexpr const char* NAME = "vector";
-    static constexpr bool NO_ALLOCATIONS = false;
     static constexpr bool IS_STUB = false;
 
     struct Rec {
@@ -84,9 +84,11 @@ class VectorBook {
         Volume volume;
     };
 
-    VectorBook() {
-        orders_.Reserve(1 << 16);
-    }
+    static constexpr const char* TABLE_NAME = Table<Rec>::NAME;
+    static constexpr bool NO_ALLOCATIONS = Table<Rec>::NO_ALLOCATIONS;
+
+    explicit VectorBookT(u64 order_reserve = DEFAULT_ORDER_RESERVE)
+        : orders_(order_reserve) {}
 
     void OnAdd(OrderId id, Side side, Price price, Volume volume) {
         auto [rec, inserted] = orders_.TryInsert(id);
@@ -164,11 +166,21 @@ class VectorBook {
         return orders_.Size();
     }
 
+    void Prefetch(OrderId id) const {
+        orders_.Prefetch(id);
+    }
+
+    TableStats OrderTableStats() const {
+        return orders_.Stats();
+    }
+
   private:
     ForwardSide<BidBetter> bids_;
     ForwardSide<AskBetter> asks_;
-    OrderTable<Rec> orders_;
+    Table<Rec> orders_;
 };
+
+using VectorBook = VectorBookT<StdOrderTable>;
 
 }
 

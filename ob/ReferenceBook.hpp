@@ -16,6 +16,9 @@ class ReferenceBook {
     static constexpr const char* NAME = "ref";
     static constexpr bool NO_ALLOCATIONS = false;
     static constexpr bool IS_STUB = false;
+    static constexpr const char* TABLE_NAME = "";
+
+    explicit ReferenceBook(u64 = 0) {}
 
     struct Lookup {
         Side side;
@@ -107,6 +110,8 @@ class ReferenceBook {
     u64 OrderCount() const {
         return orders_.size();
     }
+
+    void Prefetch(OrderId) const {}
 
     u64 OrderCount(Side side) const {
         return side == Side::Bid ? order_count(bids_)

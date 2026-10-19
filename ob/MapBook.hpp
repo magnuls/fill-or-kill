@@ -12,7 +12,8 @@
 
 namespace ob {
 
-class MapBook {
+template<template<class> class Table>
+class MapBookT {
   public:
     static constexpr const char* NAME = "map";
     static constexpr bool NO_ALLOCATIONS = false;
@@ -29,9 +30,10 @@ class MapBook {
         Asks::iterator ask;
     };
 
-    MapBook() {
-        orders_.Reserve(1 << 16);
-    }
+    static constexpr const char* TABLE_NAME = Table<Rec>::NAME;
+
+    explicit MapBookT(u64 order_reserve = DEFAULT_ORDER_RESERVE)
+        : orders_(order_reserve) {}
 
     void OnAdd(OrderId id, Side side, Price price, Volume volume) {
         auto [rec, inserted] = orders_.TryInsert(id);
@@ -121,6 +123,14 @@ class MapBook {
         return orders_.Size();
     }
 
+    void Prefetch(OrderId id) const {
+        orders_.Prefetch(id);
+    }
+
+    TableStats OrderTableStats() const {
+        return orders_.Stats();
+    }
+
   private:
     template<class M>
     static Volume at(const M& m, LevelIdx level) {
@@ -145,8 +155,10 @@ class MapBook {
 
     Bids bids_;
     Asks asks_;
-    OrderTable<Rec> orders_;
+    Table<Rec> orders_;
 };
+
+using MapBook = MapBookT<StdOrderTable>;
 
 }
 
