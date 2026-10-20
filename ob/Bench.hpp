@@ -1,6 +1,7 @@
 #ifndef OB_BENCH_HPP
 #define OB_BENCH_HPP
 
+#include "ob/OrderTable.hpp"
 #include "ob/Types.hpp"
 
 #include <algorithm>
@@ -118,8 +119,8 @@ inline void CheckInvariant(CounterInfo& info) {
     }
     info.invariant = constant && nonstop;
     info.invariant_note = info.invariant
-                             ? "constant_tsc and nonstop_tsc present"
-                             : "constant_tsc or nonstop_tsc missing";
+                              ? "constant_tsc and nonstop_tsc present"
+                              : "constant_tsc or nonstop_tsc missing";
     info.source = "rdtsc";
 #elif defined(__x86_64__)
     info.invariant = true;
@@ -357,11 +358,11 @@ inline std::string SummaryCsvRow(const RunMeta& m, const Summary& s) {
        << m.block_size << ',' << m.repeat << ',' << m.scramble << ','
        << m.empty_loop_ns << ',' << m.warmup_excluded << ','
        << m.allocs_in_timed_region << ','
-       << detail::Quote(m.git_commit)
-       << ',' << detail::Quote(m.timestamp) << ',' << s.count << ','
-       << s.min << ',' << s.median << ',' << s.p75 << ',' << s.p90
-       << ',' << s.p99 << ',' << s.p999 << ',' << s.p9999 << ','
-       << s.max << ',' << s.mean << ',' << s.stddev;
+       << detail::Quote(m.git_commit) << ','
+       << detail::Quote(m.timestamp) << ',' << s.count << ',' << s.min
+       << ',' << s.median << ',' << s.p75 << ',' << s.p90 << ','
+       << s.p99 << ',' << s.p999 << ',' << s.p9999 << ',' << s.max
+       << ',' << s.mean << ',' << s.stddev;
     return os.str();
 }
 
@@ -389,8 +390,7 @@ inline void WriteHistogramCsv(const std::string& path,
     out << "ns,count\n";
     for (u32 i = 0; i <= HISTOGRAM_BUCKETS; ++i)
         out << static_cast<f64>(i) * h.bucket_ns << ','
-            << h.buckets[i]
-            << '\n';
+            << h.buckets[i] << '\n';
 }
 
 inline void WriteRawCsv(const std::string& path,
@@ -408,6 +408,8 @@ struct RunConfig {
     f64 warmup_fraction = 0.01;
     u64 empty_loop_samples = 1'000'000;
     u64 repeat = 1;
+    u64 order_reserve = DEFAULT_ORDER_RESERVE;
+    bool prefetch = false;
 };
 
 struct RunResult {
@@ -421,7 +423,36 @@ struct RunResult {
     u64 allocs_end = 0;
     u64 passes = 1;
     std::vector<f64> pass_median_ticks;
+    u64 allocs_constructing_books = 0;
 };
+
+struct LivePeak {
+    u64 orders = 0;
+    u64 index = 0;
+};
+
+inline LivePeak FindLivePeak(const Update* updates, u64 count) {
+    i64 live = 0;
+    i64 peak = 0;
+    LivePeak out;
+    for (u64 i = 0; i < count; ++i) {
+        const Update& u = updates[i];
+        if (u.type == MsgType::Add)
+            ++live;
+        else if (u.type == MsgType::Delete || u.volume.lots <= 0)
+            --live;
+        if (live > peak) {
+            peak = live;
+            out.index = i;
+        }
+    }
+    out.orders = static_cast<u64>(peak);
+    return out;
+}
+
+inline u64 PeakLiveOrders(const Update* updates, u64 count) {
+    return FindLivePeak(updates, count).orders;
+}
 
 inline void PrefaultHeap(u64 blocks) {
     std::vector<void*> held;
@@ -480,9 +511,10 @@ inline void CrossCheck(Book& book, const Update& u) {
 #endif
 }
 
-template<class Book>
-inline void ReplayRange(Book& book, const Update* updates, u64 block,
-                        u64 from_sample, u64 to_sample, u32* out) {
+template<bool PREFETCH, class Book>
+inline void ReplayRangeImpl(Book& book, const Update* updates,
+                            u64 block, u64 from_sample, u64 to_sample,
+                            u32* out) {
     for (u64 s = from_sample; s < to_sample; ++s) {
         const Update* u = updates + s * block;
         const Update* end = u + block;
@@ -491,12 +523,28 @@ inline void ReplayRange(Book& book, const Update* updates, u64 block,
 #ifndef NDEBUG
             CrossCheck(book, *u);
 #endif
+            if constexpr (PREFETCH) {
+                if (u + 1 != end)
+                    book.Prefetch(u[1].id);
+            }
             ApplyUpdate(book, *u);
             ObserveBook(book);
         }
         u64 t1 = ReadCounter();
         out[s] = static_cast<u32>(t1 - t0);
     }
+}
+
+template<class Book>
+inline void ReplayRange(Book& book, const Update* updates, u64 block,
+                        u64 from_sample, u64 to_sample, u32* out,
+                        bool prefetch = false) {
+    if (prefetch)
+        ReplayRangeImpl<true>(book, updates, block, from_sample,
+                              to_sample, out);
+    else
+        ReplayRangeImpl<false>(book, updates, block, from_sample,
+                               to_sample, out);
 }
 
 inline f64 EmptyLoopMedianTicks(const Update* updates, u64 block,
@@ -541,16 +589,16 @@ RunResult Replay(Book& book, const Update* updates, u64 count,
         EmptyLoopMedianTicks(updates, r.block_size, empty_samples);
 
     r.warmup_samples = static_cast<u64>(static_cast<f64>(samples) *
-                                       cfg.warmup_fraction);
+                                        cfg.warmup_fraction);
     if (r.warmup_samples > samples)
         r.warmup_samples = samples;
 
     r.allocs_start = AllocationCount();
     ReplayRange(book, updates, r.block_size, 0, r.warmup_samples,
-                r.ticks.data());
+                r.ticks.data(), cfg.prefetch);
     r.allocs_after_warmup = AllocationCount();
     ReplayRange(book, updates, r.block_size, r.warmup_samples,
-                samples, r.ticks.data());
+                samples, r.ticks.data(), cfg.prefetch);
     r.allocs_end = AllocationCount();
     return r;
 }
@@ -584,19 +632,24 @@ RunResult ReplayPasses(const Update* updates, u64 count,
     std::vector<u32> scratch(per_pass);
     r.allocs_start = AllocationCount();
     for (u64 p = 0; p < passes; ++p) {
-        Book book;
+        u64 before_book = AllocationCount();
+        Book book(cfg.order_reserve);
+        if (p > 0)
+            r.allocs_constructing_books +=
+                AllocationCount() - before_book;
         u32* out = r.ticks.data() + p * per_pass;
         if (p == 0) {
             ReplayRange(book, updates, block, 0, r.warmup_samples,
-                        out);
+                        out, cfg.prefetch);
             r.allocs_after_warmup = AllocationCount();
             ReplayRange(book, updates, block, r.warmup_samples,
-                        per_pass, out);
+                        per_pass, out, cfg.prefetch);
         } else {
-            ReplayRange(book, updates, block, 0, per_pass, out);
+            ReplayRange(book, updates, block, 0, per_pass, out,
+                        cfg.prefetch);
         }
     }
-    r.allocs_end = AllocationCount();
+    r.allocs_end = AllocationCount() - r.allocs_constructing_books;
     for (u64 p = 0; p < passes; ++p) {
         const u32* out = r.ticks.data() + p * per_pass;
         std::copy(out, out + per_pass, scratch.begin());
