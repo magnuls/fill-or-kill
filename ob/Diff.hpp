@@ -94,10 +94,11 @@ bool CompareFull(const ReferenceBook& ref, const Book& book,
 
 template<class Book>
 DiffReport DiffFeed(const Update* updates, u64 count, u64 every,
-                    LevelIdx top_depth = 8) {
+                    LevelIdx top_depth = 8,
+                    u64 order_reserve = DEFAULT_ORDER_RESERVE) {
     DiffReport r;
     ReferenceBook ref;
-    Book book;
+    Book book(order_reserve);
     if (every == 0)
         every = 1;
     std::string why;

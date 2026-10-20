@@ -362,8 +362,8 @@ static std::vector<u8> msg_r(u16 locate, const std::string& stock) {
     return v;
 }
 static std::vector<u8> msg_a(u16 locate, u64 ts, u64 ref, char side,
-                            u32 shares, const std::string& stock,
-                            u32 price, bool attributed = false) {
+                             u32 shares, const std::string& stock,
+                             u32 price, bool attributed = false) {
     std::vector<u8> v = hdr(attributed ? 'F' : 'A', locate, ts);
     put64(v, ref);
     v.push_back(static_cast<u8>(side));
@@ -375,8 +375,8 @@ static std::vector<u8> msg_a(u16 locate, u64 ts, u64 ref, char side,
     return v;
 }
 static std::vector<u8> msg_e(u16 locate, u64 ts, u64 ref,
-                             u32 executed,
-                            bool with_price = false, u32 price = 0) {
+                             u32 executed, bool with_price = false,
+                             u32 price = 0) {
     std::vector<u8> v = hdr(with_price ? 'C' : 'E', locate, ts);
     put64(v, ref);
     put32(v, executed);
@@ -388,7 +388,7 @@ static std::vector<u8> msg_e(u16 locate, u64 ts, u64 ref,
     return v;
 }
 static std::vector<u8> msg_x(u16 locate, u64 ts, u64 ref,
-                            u32 cancelled) {
+                             u32 cancelled) {
     std::vector<u8> v = hdr('X', locate, ts);
     put64(v, ref);
     put32(v, cancelled);
@@ -400,7 +400,7 @@ static std::vector<u8> msg_d(u16 locate, u64 ts, u64 ref) {
     return v;
 }
 static std::vector<u8> msg_u(u16 locate, u64 ts, u64 old_ref,
-                            u64 new_ref, u32 shares, u32 price) {
+                             u64 new_ref, u32 shares, u32 price) {
     std::vector<u8> v = hdr('U', locate, ts);
     put64(v, old_ref);
     put64(v, new_ref);
@@ -727,7 +727,7 @@ template<class B>
 static void fuzz_against_reference(u64 seed, u64 ops) {
     std::mt19937_64 rng(seed);
     ReferenceBook ref;
-    B b;
+    B b(ops);
     std::vector<OrderId> live;
     OrderId next = 1;
     std::string why;
@@ -800,6 +800,8 @@ class BrokenBook {
     static constexpr const char* NAME = "broken";
     static constexpr bool NO_ALLOCATIONS = false;
     static constexpr bool IS_STUB = false;
+    explicit BrokenBook(u64 reserve = DEFAULT_ORDER_RESERVE)
+        : inner_(reserve) {}
     void OnAdd(OrderId id, Side s, Price p, Volume v) {
         inner_.OnAdd(id, s, p, v);
     }
@@ -876,20 +878,273 @@ static void search_policies() {
                                               Price{3}) == 0));
 }
 
+static std::vector<Update> small_feed();
+
+struct TRec {
+    Side side;
+    Price price;
+    Volume volume;
+};
+
+template<class Table>
+static void flat_table_basics() {
+    Table t(27110);
+    assert(t.Capacity() == 65536);
+    assert(t.Size() == 0);
+    assert(!t.Contains(1) && t.Find(1) == nullptr);
+    auto [r1, in1] = t.TryInsert(1);
+    assert(in1 && r1 != nullptr);
+    r1->price = Price{7};
+    auto [r2, in2] = t.TryInsert(1);
+    assert(!in2 && r2 == r1);
+    assert(t.Find(1)->price == Price{7});
+    auto [r0, in0] = t.TryInsert(0);
+    assert(!in0 && r0 == nullptr);
+    assert(t.Find(0) == nullptr && !t.Contains(0));
+    t.Erase(0);
+    assert(t.Size() == 1);
+    t.Erase(1);
+    assert(t.Size() == 0 && !t.Contains(1));
+    t.Erase(1);
+    assert(t.Size() == 0);
+
+    Table small(8);
+    assert(small.Capacity() == 16);
+    for (OrderId id = 1; id <= 8; ++id)
+        assert(small.TryInsert(id).second);
+    bool threw = false;
+    try {
+        small.TryInsert(9);
+    } catch (const std::length_error&) {
+        threw = true;
+    }
+    assert(threw);
+    assert(small.Size() == 8);
+    small.Erase(3);
+    assert(small.TryInsert(9).second);
+
+    Table wrap(8);
+    OrderId ids[] = {15, 31, 47, 63, 14};
+    for (OrderId id : ids)
+        assert(wrap.TryInsert(id).second);
+    for (OrderId id : ids)
+        assert(wrap.Contains(id));
+    wrap.Erase(15);
+    for (OrderId id : ids)
+        assert((id == 15) != wrap.Contains(id));
+    wrap.Erase(63);
+    assert(wrap.Contains(31) && wrap.Contains(47) &&
+           wrap.Contains(14));
+    assert(wrap.Size() == 3);
+}
+
+template<class Table>
+static void flat_table_fuzz(u64 seed) {
+    std::mt19937_64 rng(seed);
+    Table t(20000);
+    std::unordered_map<OrderId, i64> ref;
+    std::vector<OrderId> live;
+    OrderId next = 1;
+    for (u64 i = 0; i < 200'000; ++i) {
+        u64 roll = rng() % 100;
+        if (roll < 55 || live.empty()) {
+            OrderId id = (rng() % 4 == 0) ? next++ : rng() | 1;
+            if (ref.contains(id))
+                continue;
+            if (ref.size() >= 19000)
+                continue;
+            auto [rec, inserted] = t.TryInsert(id);
+            assert(inserted);
+            rec->volume = Volume{static_cast<i64>(id % 1000)};
+            ref[id] = static_cast<i64>(id % 1000);
+            live.push_back(id);
+        } else {
+            std::size_t k = rng() % live.size();
+            OrderId id = live[k];
+            assert(t.Find(id)->volume.lots == ref[id]);
+            t.Erase(id);
+            ref.erase(id);
+            live[k] = live.back();
+            live.pop_back();
+        }
+        if (i % 1000 == 0) {
+            assert(t.Size() == ref.size());
+            for (const auto& [id, v] : ref) {
+                const TRec* rec = t.Find(id);
+                assert(rec && rec->volume.lots == v);
+            }
+            TableStats s = t.Stats();
+            assert(s.size == ref.size());
+            assert(s.load <= 0.5);
+        }
+    }
+    assert(t.Size() == ref.size());
+    for (const auto& [id, v] : ref)
+        assert(t.Find(id)->volume.lots == v);
+}
+
+static void flat_table_stats() {
+    FlatIdentityTable<TRec> seq(1000);
+    for (OrderId id = 1; id <= 1000; ++id)
+        seq.TryInsert(id);
+    TableStats s = seq.Stats();
+    assert(s.size == 1000 && s.capacity == 2048);
+    assert(s.avg_probe == 0 && s.max_probe == 0);
+    assert(near(s.load, 1000.0 / 2048.0));
+
+    FlatIdentityTable<TRec> strided(1000);
+    for (OrderId id = 1; id <= 1000; ++id)
+        strided.TryInsert(id * 2048);
+    s = strided.Stats();
+    assert(s.max_probe == 999);
+    assert(s.avg_probe > 400);
+
+    FlatMixTable<TRec> mixed(1000);
+    for (OrderId id = 1; id <= 1000; ++id)
+        mixed.TryInsert(id * 2048);
+    s = mixed.Stats();
+    assert(s.max_probe < 20);
+    assert(s.avg_probe < 2.0);
+
+    StdOrderTable<TRec> std_table(100);
+    std_table.TryInsert(5);
+    s = std_table.Stats();
+    assert(s.size == 1 && s.max_probe == 0);
+}
+
+template<class B>
+static void table_only_fuzz(u64 seed, u64 ops) {
+    std::mt19937_64 rng(seed);
+    ReferenceBook ref;
+    B b(ops);
+    std::vector<OrderId> live;
+    OrderId next = 1;
+    for (u64 i = 0; i < ops; ++i) {
+        u64 roll = rng() % 100;
+        if (roll < 45 || live.empty()) {
+            Side side = (rng() & 1) ? Side::Ask : Side::Bid;
+            Price p{side == Side::Bid ? 990 : 1010};
+            Volume v{static_cast<i64>(1 + rng() % 20)};
+            OrderId id = next++;
+            ref.OnAdd(id, side, p, v);
+            b.OnAdd(id, side, p, v);
+            live.push_back(id);
+        } else if (roll < 70) {
+            std::size_t k = rng() % live.size();
+            Volume v{static_cast<i64>(rng() % 25)};
+            ref.OnModify(live[k], v);
+            b.OnModify(live[k], v);
+            if (v.lots == 0) {
+                live[k] = live.back();
+                live.pop_back();
+            }
+        } else {
+            std::size_t k = rng() % live.size();
+            ref.OnDelete(live[k]);
+            b.OnDelete(live[k]);
+            live[k] = live.back();
+            live.pop_back();
+        }
+        assert(ref.OrderCount() == b.OrderCount());
+        if (i % 100 == 0)
+            for (OrderId id : live) {
+                assert(b.Contains(id));
+                auto want = ref.DebugLookup(id);
+                auto got = b.DebugLookup(id);
+                assert(want.side == got.side &&
+                       want.price == got.price &&
+                       want.volume == got.volume);
+            }
+    }
+}
+
+static void flat_tables() {
+    flat_table_basics<FlatIdentityTable<TRec>>();
+    flat_table_basics<FlatMixTable<TRec>>();
+    flat_table_fuzz<FlatIdentityTable<TRec>>(31);
+    flat_table_fuzz<FlatMixTable<TRec>>(32);
+    flat_table_stats();
+    table_only_fuzz<TableOnlyBook<StdOrderTable>>(41, 100'000);
+    table_only_fuzz<TableOnlyBook<FlatIdentityTable>>(42, 100'000);
+    table_only_fuzz<TableOnlyBook<FlatMixTable>>(43, 100'000);
+}
+
+template<template<class> class Table>
+static void books_over_table() {
+    edge_cases<MapBookT<Table>>();
+    edge_cases<VectorBookT<Table>>();
+    edge_cases<ReverseVectorBook<LowerBoundSearch, Table>>();
+    edge_cases<ReverseVectorBook<BranchlessSearch, Table>>();
+    edge_cases<ReverseVectorBook<LinearSearch, Table>>();
+    const u64 ops = 300'000;
+    fuzz_against_reference<MapBookT<Table>>(1, ops);
+    fuzz_against_reference<VectorBookT<Table>>(2, ops);
+    fuzz_against_reference<
+        ReverseVectorBook<LowerBoundSearch, Table>>(3, ops);
+    fuzz_against_reference<
+        ReverseVectorBook<BranchlessSearch, Table>>(4, ops);
+    fuzz_against_reference<ReverseVectorBook<LinearSearch, Table>>(
+        5, ops);
+}
+
+static void books_over_flat_tables() {
+    books_over_table<FlatIdentityTable>();
+    books_over_table<FlatMixTable>();
+}
+
+static void vector_book_zero_allocations() {
+    std::vector<Update> feed = small_feed();
+    u64 peak = PeakLiveOrders(feed.data(), feed.size());
+    assert(peak > 0 && peak < feed.size());
+    VectorBookT<FlatIdentityTable> book(peak);
+    RunConfig cfg;
+    cfg.block_size = 64;
+    cfg.empty_loop_samples = 10;
+    RunResult r = Replay(book, feed.data(), feed.size(), cfg);
+    assert(r.allocs_end == r.allocs_after_warmup);
+    assert(book.OrderCount() > 0);
+    ReverseVectorBook<BranchlessSearch, FlatMixTable> rev(peak);
+    r = Replay(rev, feed.data(), feed.size(), cfg);
+    assert(r.allocs_end == r.allocs_after_warmup);
+    cfg.repeat = 3;
+    cfg.order_reserve = peak;
+    r = ReplayPasses<VectorBookT<FlatIdentityTable>>(
+        feed.data(), feed.size(), cfg);
+    assert(r.passes == 3);
+    assert(r.allocs_constructing_books > 0);
+    assert(r.allocs_end == r.allocs_after_warmup);
+    cfg.prefetch = true;
+    r = ReplayPasses<VectorBookT<FlatIdentityTable>>(
+        feed.data(), feed.size(), cfg);
+    assert(r.allocs_end == r.allocs_after_warmup);
+    assert(r.updates_replayed == (feed.size() / 64) * 64 * 3);
+    static_assert(VectorBookT<FlatIdentityTable>::NO_ALLOCATIONS);
+    static_assert(!VectorBookT<StdOrderTable>::NO_ALLOCATIONS);
+    static_assert(!MapBookT<FlatIdentityTable>::NO_ALLOCATIONS);
+}
+
 static void diff_feed_passes_and_catches() {
     FeedConfig c = small_config(21, 80'000);
     std::vector<Update> feed = GenerateFeed(c);
     DiffReport r;
-    for (const char* n : VARIANT_NAMES) {
-        bool known = DispatchBook(n, [&](auto tag) {
-            using B = typename decltype(tag)::type;
-            if constexpr (!B::IS_STUB)
-                r = DiffFeed<B>(feed.data(), feed.size(), 500);
-        });
-        assert(known);
-        assert(r.ok && r.updates == feed.size() &&
-               r.full_compares == 160);
-    }
+    for (const char* t : TABLE_NAMES)
+        for (const char* n : VARIANT_NAMES) {
+            bool known = DispatchBook(n, t, [&](auto tag) {
+                using B = typename decltype(tag)::type;
+                if constexpr (!B::IS_STUB)
+                    r = DiffFeed<B>(feed.data(), feed.size(), 500);
+            });
+            assert(known);
+            assert(r.ok && r.updates == feed.size() &&
+                   r.full_compares == 160);
+        }
+    bool table_known = DispatchBook("table", "mix", [&](auto tag) {
+        using B = typename decltype(tag)::type;
+        assert(B::IS_STUB);
+        assert(std::string(B::TABLE_NAME) == "mix");
+    });
+    assert(table_known);
+    assert(!DispatchBook("map", "nope", [](auto) {}));
     r = DiffFeed<BrokenBook<VectorBook>>(feed.data(), feed.size(),
                                          500);
     assert(!r.ok);
@@ -1047,6 +1302,10 @@ int main() {
     books_fuzz();
     diff_feed_passes_and_catches();
     std::cout << "books ok\n";
+    flat_tables();
+    books_over_flat_tables();
+    vector_book_zero_allocations();
+    std::cout << "order tables ok\n";
     std::cout << "all checks passed\n";
     return 0;
 }
