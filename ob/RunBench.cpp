@@ -6,6 +6,7 @@
 #include <ctime>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include <sys/wait.h>
 #include <unistd.h>
@@ -34,6 +35,7 @@ namespace {
 struct Args {
     std::string feed;
     std::string book = "stub";
+    std::string table = "std";
     std::string name;
     std::string block = "auto";
     std::string summary = "results/summary.csv";
@@ -47,6 +49,9 @@ struct Args {
     ob::u64 scramble = 0;
     bool no_aslr = false;
     bool no_dither = false;
+    ob::u64 reserve = 0;
+    ob::u64 id_stride = 1;
+    bool prefetch = false;
 };
 
 int g_anchor = 0;
@@ -84,15 +89,16 @@ int ReexecWithoutAslr(char** argv) {
 
 void Usage() {
     std::cerr
-        << "usage: ob_bench --feed PATH [--book NAME] [--block "
-           "auto|N]\n"
+        << "usage: ob_bench --feed PATH [--book NAME] [--table NAME] "
+           "[--block auto|N]\n"
            "                [--summary PATH] [--hist PATH] [--raw "
            "PATH]\n"
            "                [--name LABEL] [--limit N] "
            "[--bucket-ns F]\n"
            "                [--repeat N] [--prefault N] "
            "[--scramble N] [--no-aslr] [--no-dither]\n"
-           "                [--allow-noninvariant]\n";
+           "                [--reserve N] [--id-stride N] "
+           "[--prefetch] [--allow-noninvariant]\n";
 }
 
 std::string NowUtc() {
@@ -118,10 +124,13 @@ ob::u64 ChooseBlock(const Args& a, const ob::CounterInfo& ci,
 
 template<class Book>
 double PilotNsPerUpdate(const ob::Update* updates, ob::u64 count,
-                        double ticks_per_ns) {
-    Book book;
+                        double ticks_per_ns, ob::u64 reserve,
+                        bool prefetch) {
+    Book book(reserve);
     ob::RunConfig cfg;
     cfg.block_size = 1024;
+    cfg.order_reserve = reserve;
+    cfg.prefetch = prefetch;
     cfg.warmup_fraction = 0.0;
     cfg.empty_loop_samples = 0;
     ob::u64 n = std::min<ob::u64>(count, 1'000'000);
@@ -136,15 +145,20 @@ double PilotNsPerUpdate(const ob::Update* updates, ob::u64 count,
 
 template<class Book>
 int RunBook(const Args& a, const ob::MappedFeed& feed,
-            const ob::CounterInfo& ci) {
+            const ob::Update* updates, const ob::CounterInfo& ci) {
     ob::u64 count = feed.count();
     if (a.limit > 0 && a.limit < count)
         count = a.limit;
 
-    double pilot =
-        PilotNsPerUpdate<Book>(feed.data(), count, ci.ticks_per_ns);
+    ob::LivePeak live = ob::FindLivePeak(updates, count);
+    ob::u64 peak = live.orders;
+    ob::u64 reserve = a.reserve > 0 ? a.reserve : peak;
+    double pilot = PilotNsPerUpdate<Book>(
+        updates, count, ci.ticks_per_ns, reserve, a.prefetch);
     ob::RunConfig cfg;
     cfg.block_size = ChooseBlock(a, ci, pilot);
+    cfg.order_reserve = reserve;
+    cfg.prefetch = a.prefetch;
 
     cfg.repeat = a.repeat;
     if (a.prefault > 0)
@@ -153,9 +167,9 @@ int RunBook(const Args& a, const ob::MappedFeed& feed,
         ob::ScrambleHeap(a.scramble);
     ob::u64 adds_per_pass = 0;
     for (ob::u64 i = 0; i < count; ++i)
-        adds_per_pass += feed.data()[i].type == ob::MsgType::Add;
+        adds_per_pass += updates[i].type == ob::MsgType::Add;
 
-    ob::RunResult r = ob::ReplayPasses<Book>(feed.data(), count, cfg);
+    ob::RunResult r = ob::ReplayPasses<Book>(updates, count, cfg);
     std::vector<double> ns =
         ob::TicksToNsPerUpdate(r, ci.ticks_per_ns);
     std::span<const double> measured(ns.data() + r.warmup_samples,
@@ -172,8 +186,16 @@ int RunBook(const Args& a, const ob::MappedFeed& feed,
             : std::vector<double>(measured.begin(), measured.end());
     ob::Histogram h = ob::BuildHistogram(for_hist, a.bucket_ns);
 
+    std::string table_name = Book::TABLE_NAME;
+    std::string default_name = Book::NAME;
+    if (!table_name.empty() && table_name != "std")
+        default_name += "_" + table_name;
+    if (a.id_stride > 1)
+        default_name += "_stride" + std::to_string(a.id_stride);
+    if (a.prefetch)
+        default_name += "_prefetch";
     ob::RunMeta m;
-    m.book = a.name.empty() ? std::string(Book::NAME) : a.name;
+    m.book = a.name.empty() ? default_name : a.name;
     m.source = feed.source();
     m.seed = feed.config().seed;
     m.update_count = r.updates_replayed;
@@ -203,9 +225,9 @@ int RunBook(const Args& a, const ob::MappedFeed& feed,
         << "flags:             " << m.flags << '\n'
         << "cpu:               " << m.cpu_model << '\n'
         << "counter:           " << ci.source << ", "
-        << ci.ticks_per_ns
-        << " ticks/ns, observed resolution " << ci.resolution_ns
-        << " ns, " << (ci.coarse ? "coarse" : "fine") << '\n'
+        << ci.ticks_per_ns << " ticks/ns, observed resolution "
+        << ci.resolution_ns << " ns, "
+        << (ci.coarse ? "coarse" : "fine") << '\n'
         << "invariant:         " << ci.invariant_note << '\n'
         << "block size:        " << r.block_size
         << " updates per sample\n"
@@ -215,6 +237,19 @@ int RunBook(const Args& a, const ob::MappedFeed& feed,
         << " heap blocks allocated and freed before timing\n"
         << "scramble:          " << a.scramble
         << " heap blocks, half freed in shuffled order, half kept\n"
+        << "order table:       "
+        << (table_name.empty() ? std::string("none") : table_name)
+        << ", reserve " << reserve << " (peak live orders " << peak
+        << (a.reserve > 0 ? ", overridden)" : ")") << '\n'
+        << "id stride:         " << a.id_stride
+        << (a.id_stride > 1 ? " (ids multiplied at load, adversarial)"
+                            : "")
+        << '\n'
+        << "prefetch:          "
+        << (a.prefetch ? "next update's table slot, batched feed "
+                         "only, not a live feed technique"
+                       : "off")
+        << '\n'
         << "aslr:              "
         << (std::getenv("OB_ASLR_DISABLED") ? "disabled" : "enabled")
         << ", anchor address " << static_cast<void*>(&g_anchor)
@@ -229,13 +264,14 @@ int RunBook(const Args& a, const ob::MappedFeed& feed,
         << " ns per block median, not subtracted\n"
         << "allocations:       "
         << (r.allocs_after_warmup - r.allocs_start)
-        << " during warmup, "
-        << m.allocs_in_timed_region << " after warmup, "
+        << " during warmup, " << m.allocs_in_timed_region
+        << " after warmup, "
         << (adds_per_pass > 0
                 ? static_cast<double>(m.allocs_in_timed_region) /
                       static_cast<double>(adds_per_pass * r.passes)
                 : 0.0)
-        << " per add\n"
+        << " per add, " << r.allocs_constructing_books
+        << " constructing books between passes excluded\n"
         << "git commit:        " << m.git_commit << '\n'
         << "timestamp:         " << m.timestamp << '\n'
         << "ns per update:     count=" << s.count << " min=" << s.min
@@ -250,6 +286,27 @@ int RunBook(const Args& a, const ob::MappedFeed& feed,
                       << t / (ci.ticks_per_ns *
                               static_cast<double>(r.block_size));
         std::cout << " ns\n";
+    }
+    if constexpr (requires(const Book& b) { b.OrderTableStats(); }) {
+        Book probe(reserve);
+        ob::u64 i = 0;
+        for (; i <= live.index && i < count; ++i)
+            ob::ApplyUpdate(probe, updates[i]);
+        ob::TableStats t = probe.OrderTableStats();
+        std::cout << "table:             " << table_name
+                  << " capacity=" << t.capacity << ", at peak live "
+                  << "(update " << live.index << "): size=" << t.size
+                  << " load=" << t.load
+                  << " avg_probe=" << t.avg_probe
+                  << " max_probe=" << t.max_probe << '\n';
+        Book half(reserve);
+        for (ob::u64 j = 0; j < count / 2; ++j)
+            ob::ApplyUpdate(half, updates[j]);
+        t = half.OrderTableStats();
+        std::cout << "table at midpoint: size=" << t.size
+                  << " load=" << t.load
+                  << " avg_probe=" << t.avg_probe
+                  << " max_probe=" << t.max_probe << '\n';
     }
 
     int rc = 0;
@@ -305,6 +362,14 @@ int main(int argc, char** argv) {
             a.feed = next("--feed");
         else if (s == "--book")
             a.book = next("--book");
+        else if (s == "--table")
+            a.table = next("--table");
+        else if (s == "--reserve")
+            a.reserve = std::stoull(next("--reserve"));
+        else if (s == "--id-stride")
+            a.id_stride = std::stoull(next("--id-stride"));
+        else if (s == "--prefetch")
+            a.prefetch = true;
         else if (s == "--name")
             a.name = next("--name");
         else if (s == "--block")
@@ -360,14 +425,23 @@ int main(int argc, char** argv) {
             return 3;
         }
         ob::MappedFeed feed(a.feed);
+        std::vector<ob::Update> strided;
+        const ob::Update* updates = feed.data();
+        if (a.id_stride > 1) {
+            strided.assign(feed.data(), feed.data() + feed.count());
+            for (ob::Update& u : strided)
+                u.id *= a.id_stride;
+            updates = strided.data();
+        }
         int rc = 0;
-        bool known = ob::DispatchBook(a.book, [&](auto tag) {
+        bool known = ob::DispatchBook(a.book, a.table, [&](auto tag) {
             using B = typename decltype(tag)::type;
-            rc = RunBook<B>(a, feed, ci);
+            rc = RunBook<B>(a, feed, updates, ci);
         });
         if (!known) {
-            std::cerr << "unknown book " << a.book
-                      << " (known: " << ob::KnownBooks() << ")\n";
+            std::cerr << "unknown book or table " << a.book << " / "
+                      << a.table << " (books: " << ob::KnownBooks()
+                      << "; tables: " << ob::KnownTables() << ")\n";
             return 1;
         }
         return rc;

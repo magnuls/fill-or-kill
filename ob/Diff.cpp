@@ -12,8 +12,9 @@ namespace {
 
 void Usage() {
     std::cerr
-        << "usage: ob_diff --feed PATH [--book NAME|all] [--every "
-           "N] [--depth N]\n";
+        << "usage: ob_diff --feed PATH [--book NAME|all] [--table "
+           "NAME|all]\n"
+           "               [--every N] [--depth N] [--reserve N]\n";
 }
 
 }
@@ -21,7 +22,9 @@ void Usage() {
 int main(int argc, char** argv) {
     std::string feed_path;
     std::string book = "all";
+    std::string table = "all";
     ob::u64 every = 1000;
+    ob::u64 reserve = 0;
     ob::LevelIdx depth = 8;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -36,6 +39,10 @@ int main(int argc, char** argv) {
             feed_path = next("--feed");
         else if (a == "--book")
             book = next("--book");
+        else if (a == "--table")
+            table = next("--table");
+        else if (a == "--reserve")
+            reserve = std::stoull(next("--reserve"));
         else if (a == "--every")
             every = std::stoull(next("--every"));
         else if (a == "--depth")
@@ -62,38 +69,50 @@ int main(int argc, char** argv) {
                 names.push_back(n);
         else
             names.push_back(book);
+        std::vector<std::string> tables;
+        if (table == "all")
+            for (const char* t : ob::TABLE_NAMES)
+                tables.push_back(t);
+        else
+            tables.push_back(table);
+        if (reserve == 0)
+            reserve = ob::PeakLiveOrders(feed.data(), feed.count());
         std::cout << "feed:    " << feed_path << " (" << feed.source()
                   << "), " << feed.count()
                   << " updates, full compare every " << every
-                  << ", top depth " << depth << " every update\n";
+                  << ", top depth " << depth << " every update, "
+                  << "order reserve " << reserve << '\n';
         int rc = 0;
-        for (const std::string& n : names) {
-            ob::u64 t0 = ob::MonotonicNs();
-            ob::DiffReport r;
-            bool known = ob::DispatchBook(n, [&](auto tag) {
-                using B = typename decltype(tag)::type;
-                if constexpr (!B::IS_STUB)
-                    r = ob::DiffFeed<B>(feed.data(), feed.count(),
-                                        every, depth);
-            });
-            if (!known) {
-                std::cerr << "unknown book " << n
-                          << " (known: " << ob::KnownBooks() << ")\n";
-                return 1;
+        for (const std::string& t : tables)
+            for (const std::string& n : names) {
+                ob::u64 t0 = ob::MonotonicNs();
+                ob::DiffReport r;
+                bool known = ob::DispatchBook(n, t, [&](auto tag) {
+                    using B = typename decltype(tag)::type;
+                    if constexpr (!B::IS_STUB)
+                        r = ob::DiffFeed<B>(feed.data(), feed.count(),
+                                            every, depth, reserve);
+                });
+                if (!known) {
+                    std::cerr
+                        << "unknown book or table " << n << " / " << t
+                        << " (books: " << ob::KnownBooks()
+                        << "; tables: " << ob::KnownTables() << ")\n";
+                    return 1;
+                }
+                ob::u64 t1 = ob::MonotonicNs();
+                std::cout << n << " on " << t << ": ";
+                if (r.ok)
+                    std::cout << "OK, " << r.updates << " updates, "
+                              << r.full_compares << " full compares, "
+                              << static_cast<double>(t1 - t0) / 1e9
+                              << " s\n";
+                else {
+                    std::cout << "FAIL at update " << r.failed_at
+                              << ": " << r.failure << '\n';
+                    rc = 1;
+                }
             }
-            ob::u64 t1 = ob::MonotonicNs();
-            std::cout << n << ": ";
-            if (r.ok)
-                std::cout << "OK, " << r.updates << " updates, "
-                          << r.full_compares << " full compares, "
-                          << static_cast<double>(t1 - t0) / 1e9
-                          << " s\n";
-            else {
-                std::cout << "FAIL at update " << r.failed_at << ": "
-                          << r.failure << '\n';
-                rc = 1;
-            }
-        }
         return rc;
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << '\n';
