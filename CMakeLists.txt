@@ -58,7 +58,6 @@ find_package(ZLIB REQUIRED)
 
 enable_testing()
 
-add_subdirectory(matching)
 
 add_executable(ob_genfeed ob/GenFeed.cpp ob/Feed.cpp)
 target_include_directories(ob_genfeed PRIVATE ${CMAKE_SOURCE_DIR})
